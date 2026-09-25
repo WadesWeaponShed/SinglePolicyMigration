@@ -1,0 +1,15 @@
+node_modules/
+.DS_Store
+.env
+upstream/
+.impeccable/review/
+
+.recovery/
+
+.catalog-cache/
+
+.venv/
+.archives/
+__pycache__/
+
+.reference/

@@ -56,7 +56,13 @@ After bulk inventory reads and per-scan definition caching, the same 200-create/
 
 These are single lab measurements, not a statistical performance guarantee or a Python timing comparison. The final run used 53 mutation submissions overall, including 24 for 200 objects plus 100 Access rules. Gateway and cluster runs were repeated with inherited profile-value verification enabled and passed. All four final native runs have verified discard records; there are zero unresolved migrations. See [machine-readable results](native-lab-results.json).
 
-The final automated regression suite passes **234 tests**, including failed readback/discard, uncertain asynchronous tasks, API version pins, independent endpoints, real local TLS/proxy transport, exact object matching, and archive conversions.
+The final automated regression suite passes **235 tests**, including failed readback/discard, uncertain asynchronous tasks, API version pins, independent endpoints, real local TLS/proxy transport, exact object matching, archive conversions, and named Threat Prevention exception action readback.
+
+## Combined stress test
+
+`SPM_CHAOS_20260925` passed native staging and independent readback in Katia: 234 new objects, 307 Access rules across ordered and nested inline layers, 30 HTTPS rules, 12 Threat Prevention rules with two custom profiles, 12 direct exceptions, two shared exception groups, 20 manual NAT rules, and ten automatic-NAT objects. The fixture included IPv6 and dual-stack dependencies. This test exposed and led to a fix for named TP exception actions being returned as built-in UIDs during readback.
+
+The operator subsequently reported completing, publishing, and confirming the move to Prepotente. Destination publication and visual confirmation are operator-reported; this run did not establish packet-flow behavior or performance relative to Python.
 
 ## Intentional boundaries
 
