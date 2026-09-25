@@ -37,4 +37,29 @@
 .check-row-result.warning svg{color:var(--warn)}
 .badge.warning{background:var(--amber-bg);color:var(--warn)}
 
-.connection-fields {border:0;padding:0;margin:0;min-width:0;display:grid;gap:16px}.connection-fields[hidden]{display:none}.endpoint-fields {border:1px solid var(--border,#d8d8d8);padding:16px;min-width:0;display:grid;gap:12px}.endpoint-fields legend{font-weight:600;padding:0 6px}
+.connection-fields {border:0;padding:0;margin:0;min-width:0;display:grid;gap:16px}.connection-fields[hidden]{display:none}.endpoint-fields {border:0;border-top:1px solid var(--line);padding:18px 0 0;margin:8px 0 0;min-width:0;display:grid;gap:16px}
+.endpoint-fields legend{font-size:15px;font-weight:600;padding:0 12px 0 0;color:var(--ink)}
+.connection-form label{min-width:0}
+.connection-form .field-help{margin:0;line-height:1.55}
+.connection-form label .field-help{display:block;margin-top:6px}
+.connection-form .check-row + .field-help{margin:-10px 0 0 26px}
+.connection-form .endpoint-intro{margin:0 0 4px}
+.endpoint-credentials{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.connection-form .check-row{align-items:flex-start;font-weight:500}
+.connection-form .check-row input{flex:none;margin:1px 0 0}
+.connection-proxy{border-top:1px solid var(--line);padding-top:14px;margin-top:5px;font-size:12px}
+.connection-proxy summary{cursor:pointer;min-height:32px;color:var(--muted)}
+.connection-proxy[open] summary{margin-bottom:10px;color:var(--ink)}
+.connection-form input[aria-invalid=true]{border-color:var(--error);background:var(--error-bg)}
+.connection-form .status-message{border-radius:6px;line-height:1.5}
+@media(max-width:520px){.endpoint-credentials{grid-template-columns:1fr}.endpoint-fields{gap:14px}}
+
+.project-credit{margin-top:32px;padding-top:24px;border-top:1px solid var(--line)}
+.creator-credit{display:inline-flex;align-items:center;gap:14px;text-decoration:none;color:var(--ink)}
+.creator-credit img{display:block;width:56px;height:56px;border-radius:6px;object-fit:cover}
+.creator-credit strong{display:block;font-size:14px;font-weight:600}
+.creator-credit span span{display:block;font-size:12px;color:var(--muted);margin-top:3px}
+.creator-credit:hover strong{text-decoration:underline;text-underline-offset:3px}
+.project-credit p{font-size:12px;line-height:1.6;margin:14px 0 0}
+.project-credit .upstream-credit{margin-top:5px}
+.project-credit a{overflow-wrap:anywhere}

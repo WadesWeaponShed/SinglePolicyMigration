@@ -7,7 +7,7 @@
 </head>
 <body>
 <main class="app">
-  <header class="masthead"><a class="brand" href="/" aria-label="Single Policy Move home"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M5 10h9v9H5zM22 17h9v9h-9zM15 14h11m-4-4 4 4-4 4M21 23H10m4-4-4 4 4 4"/></svg><span>Single Policy <span class="brand-to">Move</span><small>Check Point policy migration</small></span></a><span class="framework-label">Built on API Framework <span class="badge">Native migration</span></span></header>
+  <header class="masthead"><a class="brand" href="/" aria-label="Single Policy Move home"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M5 10h9v9H5zM22 17h9v9h-9zM15 14h11m-4-4 4 4-4 4M21 23H10m4-4-4 4 4 4"/></svg><span>Single Policy <span class="brand-to">Move</span><small>Check Point policy migration</small></span></a><span class="framework-label"><span class="badge">Native migration</span></span></header>
   <section id="activityPanel" class="activity-panel" aria-label="Current activity" hidden>
     <div class="activity-heading"><strong id="activityTitle"></strong><span id="activityElapsed" class="activity-time"></span></div>
     <p id="activityMessage" role="status" aria-live="polite" aria-atomic="true"></p>
@@ -20,8 +20,16 @@
       <ol class="intro-steps"><li><b>Connect your domains</b><span>Select a source, destination, and policy package.</span></li><li><b>Preview the complete change</b><span>Inspect object matches, conflicts, and the rulebase.</span></li><li><b>Stage, review, then publish</b><span>Keep control of when changes become permanent.</span></li></ol>
       <div class="intro-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM8 12l3 3 5-6"/></svg><p>Global assignments and unresolved duplicates stop the migration. The source remains in place.</p></div>
       <button type="button" id="demoButton" class="demo-button">Explore a sample migration <span aria-hidden="true">→</span></button><p class="fine-print">Synthetic data. No connection or credentials required.</p>
+      <div class="project-credit" aria-label="Project credits">
+        <a class="creator-credit" href="https://github.com/WadesWeaponShed/" target="_blank" rel="noopener noreferrer">
+          <img src="/creator-avatar.png" width="56" height="56" alt="Adam F.'s GitHub avatar">
+          <span><strong>Built by Adam F.</strong><span>WadesWeaponShed</span></span>
+        </a>
+        <p>Built on <a href="https://github.com/WadesWeaponShed/Check-Point-API-Framework" target="_blank" rel="noopener noreferrer">API Framework</a></p>
+        <p class="upstream-credit">Upstream project: <a href="https://github.com/CheckPointSW/ExportImportPolicyPackage" target="_blank" rel="noopener noreferrer">Check Point ExportImportPolicyPackage</a></p>
+      </div>
     </div>
-    <form id="loginForm" class="connection-form">
+    <form id="loginForm" class="connection-form" novalidate>
       <h2>Connect management</h2><p class="muted">Credentials stay in server memory for this session.</p>
       <label>Connection mode<select name="mode" id="connectionMode"><option value="mds">Two domains on one MDS</option><option value="pair">Separate management endpoints</option></select></label>
       <fieldset id="mdsConnectionFields" class="connection-fields"><legend class="sr-only">MDS connection</legend>
@@ -33,29 +41,29 @@
       <label class="check-row"><input name="largeEnvironmentMode" type="checkbox" checked> Large environment mode</label><p class="field-help">Use throttled API requests for large MDS deployments.</p>
       <label class="check-row"><input name="ignoreTls" type="checkbox" checked> Allow unverified / self-signed TLS certificates</label>
       </fieldset>
-      <fieldset id="pairConnectionFields" class="connection-fields" hidden disabled><legend>Source and destination</legend><p class="field-help">Use standalone management or Smart-1 Cloud, or specify an MDS domain name. Each side uses its own credentials.</p>
+      <fieldset id="pairConnectionFields" class="connection-fields" hidden disabled><legend class="sr-only">Source and destination</legend><p class="field-help endpoint-intro">Use standalone management or Smart-1 Cloud, or specify an MDS domain name. Each side uses its own credentials.</p>
 <fieldset class="endpoint-fields"><legend>Source</legend>
 <label>Source address<input name="sourceHost" placeholder="https://management.example.com" required autocomplete="off"></label>
-<label>Domain name or UID<input name="sourceDomain" autocomplete="off"><span class="field-help">For MDS only; leave empty for standalone management.</span></label>
+<label>Domain name or UID<input name="sourceDomain" autocomplete="off" aria-describedby="sourceDomainHelp"><span id="sourceDomainHelp" class="field-help">For MDS only; leave empty for standalone management.</span></label>
 <label>Authentication<select name="sourceAuthMode"><option value="password">Username & password</option><option value="api-key">API key</option></select></label>
-<label>Username<input name="sourceUsername" autocomplete="username"></label>
-<label>Password<input name="sourcePassword" type="password" autocomplete="current-password"></label>
-<label>API key<input name="sourceApiKey" type="password" autocomplete="off"></label>
+<div class="endpoint-credentials"><label>Username<input name="sourceUsername" autocomplete="username"></label>
+<label>Password<input name="sourcePassword" type="password" autocomplete="current-password"></label></div>
+<label hidden>API key<input name="sourceApiKey" type="password" autocomplete="off" disabled></label>
 <label class="check-row"><input name="sourceSmart1Cloud" type="checkbox"> Smart-1 Cloud tenant URL</label>
 <label class="check-row"><input name="sourceIgnoreTls" type="checkbox"> Allow unverified / self-signed TLS certificates</label>
 </fieldset>
 <fieldset class="endpoint-fields"><legend>Destination</legend>
 <label>Destination address<input name="targetHost" placeholder="https://management.example.com" required autocomplete="off"></label>
-<label>Domain name or UID<input name="targetDomain" autocomplete="off"><span class="field-help">For MDS only; leave empty for standalone management.</span></label>
+<label>Domain name or UID<input name="targetDomain" autocomplete="off" aria-describedby="targetDomainHelp"><span id="targetDomainHelp" class="field-help">For MDS only; leave empty for standalone management.</span></label>
 <label>Authentication<select name="targetAuthMode"><option value="password">Username & password</option><option value="api-key">API key</option></select></label>
-<label>Username<input name="targetUsername" autocomplete="username"></label>
-<label>Password<input name="targetPassword" type="password" autocomplete="current-password"></label>
-<label>API key<input name="targetApiKey" type="password" autocomplete="off"></label>
+<div class="endpoint-credentials"><label>Username<input name="targetUsername" autocomplete="username"></label>
+<label>Password<input name="targetPassword" type="password" autocomplete="current-password"></label></div>
+<label hidden>API key<input name="targetApiKey" type="password" autocomplete="off" disabled></label>
 <label class="check-row"><input name="targetSmart1Cloud" type="checkbox"> Smart-1 Cloud tenant URL</label>
 <label class="check-row"><input name="targetIgnoreTls" type="checkbox"> Allow unverified / self-signed TLS certificates</label>
 </fieldset>
       </fieldset>
-      <details><summary>Management proxy (optional)</summary><label>HTTP or HTTPS proxy URL<input name="proxyUrl" type="password" autocomplete="off" placeholder="http://proxy.example.com:8080"><span class="field-help">Used for both endpoints. Optional user:password authentication stays in session memory.</span></label></details>
+      <details class="connection-proxy"><summary>Management proxy (optional)</summary><label>HTTP or HTTPS proxy URL<input name="proxyUrl" type="password" autocomplete="off" placeholder="http://proxy.example.com:8080"><span class="field-help">Used for both endpoints. Optional user:password authentication stays in session memory.</span></label></details>
       <p id="loginStatus" class="status-message" role="status"></p>
       <button class="primary" type="submit" id="connectButton">Connect to MDS <span aria-hidden="true">→</span></button>
     </form>

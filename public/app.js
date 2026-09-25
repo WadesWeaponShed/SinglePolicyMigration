@@ -130,9 +130,27 @@ $('#connectionMode').addEventListener('change',()=>{
  $('#pairConnectionFields').hidden=!pair;$('#pairConnectionFields').disabled=!pair;
  $('#connectButton').textContent=pair?'Connect management endpoints':'Connect to MDS →';
 });
-$('#authMode').addEventListener('change',()=>{const key=$('#authMode').value==='api-key';$('#usernameField').hidden=key;$('#passwordField').hidden=key;$('#keyField').hidden=!key;});
+function syncAuthentication(prefix='') {
+ const form=$('#loginForm'),name=field=>prefix?prefix+field[0].toUpperCase()+field.slice(1):field;
+ const key=form.elements[name('authMode')].value==='api-key';
+ for(const field of ['username','password','apiKey']) {
+   const input=form.elements[name(field)],hidden=field==='apiKey'?!key:key;
+   input.closest('label').hidden=hidden;input.disabled=hidden;input.required=!hidden;
+   if(hidden)input.removeAttribute('aria-invalid');
+ }
+ if(prefix)form.elements[name('username')].closest('.endpoint-credentials').hidden=key;
+}
+for(const prefix of ['', 'source','target']) {
+ const name=prefix?prefix+'AuthMode':'authMode';
+ $('#loginForm').elements[name].addEventListener('change',()=>syncAuthentication(prefix));
+ syncAuthentication(prefix);
+}
+$('#loginForm').addEventListener('input',e=>{e.target.removeAttribute('aria-invalid');$('#loginStatus').textContent='';});
 $('#loginForm').addEventListener('submit',async e=>{
-  e.preventDefault();if(busy)return;busy=true;const button=e.submitter;button.disabled=true;$('#loginStatus').classList.add('is-working');$('#loginStatus').textContent='Connecting and discovering MDS domains…';
+  e.preventDefault();if(busy)return;
+  const invalid=[...e.currentTarget.elements].find(input=>input.willValidate&&!input.validity.valid);
+  if(invalid){invalid.setAttribute('aria-invalid','true');invalid.setAttribute('aria-describedby','loginStatus');$('#loginStatus').textContent=`Enter ${invalid.closest('label').firstChild.textContent.trim().toLowerCase()} to continue.`;invalid.focus();return;}
+  busy=true;const button=e.submitter||$('#connectButton');button.disabled=true;$('#loginStatus').classList.add('is-working');$('#loginStatus').textContent=$('#connectionMode').value==='pair'?'Connecting source and destination…':'Connecting and discovering MDS domains…';
   const f=new FormData(e.currentTarget),body=Object.fromEntries(f);
   body.ignoreTls=f.has('ignoreTls');body.largeEnvironmentMode=f.has('largeEnvironmentMode');
   if(body.mode==='pair')for(const prefix of ['source','target'])body[prefix]={proxyUrl:f.get('proxyUrl'),host:f.get(prefix+'Host'),domain:f.get(prefix+'Domain'),authMode:f.get(prefix+'AuthMode'),username:f.get(prefix+'Username'),password:f.get(prefix+'Password'),apiKey:f.get(prefix+'ApiKey'),smart1Cloud:f.has(prefix+'Smart1Cloud'),ignoreTls:f.has(prefix+'IgnoreTls'),largeEnvironmentMode:true};
