@@ -1,0 +1,17 @@
+{
+  "name": "single-policy-move",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Native Check Point policy package migration with preview, staged verification and recovery",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && node --check public/app.js && node --test test/*.test.js",
+    "test": "node --test test/*.test.js",
+    "catalog:update": "node scripts/update-catalogs.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

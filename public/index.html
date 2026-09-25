@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Single Policy Move · Policy Migration</title>
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/migration.css">
+</head>
+<body>
+<main class="app">
+  <header class="masthead"><a class="brand" href="/" aria-label="Single Policy Move home"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M5 10h9v9H5zM22 17h9v9h-9zM15 14h11m-4-4 4 4-4 4M21 23H10m4-4-4 4 4 4"/></svg><span>Single Policy <span class="brand-to">Move</span><small>Check Point policy migration</small></span></a><span class="framework-label">Built on API Framework <span class="badge">Native migration</span></span></header>
+  <section id="activityPanel" class="activity-panel" aria-label="Current activity" hidden>
+    <div class="activity-heading"><strong id="activityTitle"></strong><span id="activityElapsed" class="activity-time"></span></div>
+    <p id="activityMessage" role="status" aria-live="polite" aria-atomic="true"></p>
+    <div class="activity-footer"><progress id="activityProgress" aria-label="Operation in progress"></progress><span id="activityHeartbeat"></span></div>
+  </section>
+  <section class="panel login-panel" id="loginCard">
+    <div class="login-intro">
+      <h1>Move a policy.<br><span>Know what changes.</span></h1>
+      <p class="lede">A single policy, its objects, and a clear path between your management domains.</p>
+      <ol class="intro-steps"><li><b>Connect your domains</b><span>Select a source, destination, and policy package.</span></li><li><b>Preview the complete change</b><span>Inspect object matches, conflicts, and the rulebase.</span></li><li><b>Stage, review, then publish</b><span>Keep control of when changes become permanent.</span></li></ol>
+      <div class="intro-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM8 12l3 3 5-6"/></svg><p>Global assignments and unresolved duplicates stop the migration. The source remains in place.</p></div>
+      <button type="button" id="demoButton" class="demo-button">Explore a sample migration <span aria-hidden="true">→</span></button><p class="fine-print">Synthetic data. No connection or credentials required.</p>
+    </div>
+    <form id="loginForm" class="connection-form">
+      <h2>Connect management</h2><p class="muted">Credentials stay in server memory for this session.</p>
+      <label>Connection mode<select name="mode" id="connectionMode"><option value="mds">Two domains on one MDS</option><option value="pair">Separate management endpoints</option></select></label>
+      <fieldset id="mdsConnectionFields" class="connection-fields"><legend class="sr-only">MDS connection</legend>
+      <label>MDS host<input name="host" placeholder="mds.example.com" required autocomplete="off"></label>
+      <div class="form-row"><label>Port<input name="port" value="443" inputmode="numeric"></label><label>Authentication<select name="authMode" id="authMode"><option value="password">Username & password</option><option value="api-key">API key</option></select></label></div>
+      <label id="usernameField">Username<input name="username" autocomplete="username"></label>
+      <label id="passwordField">Password<input name="password" type="password" autocomplete="current-password"></label>
+      <label id="keyField" hidden>API key<input name="apiKey" type="password" autocomplete="off"></label>
+      <label class="check-row"><input name="largeEnvironmentMode" type="checkbox" checked> Large environment mode</label><p class="field-help">Use throttled API requests for large MDS deployments.</p>
+      <label class="check-row"><input name="ignoreTls" type="checkbox" checked> Allow unverified / self-signed TLS certificates</label>
+      </fieldset>
+      <fieldset id="pairConnectionFields" class="connection-fields" hidden disabled><legend>Source and destination</legend><p class="field-help">Use standalone management or Smart-1 Cloud, or specify an MDS domain name. Each side uses its own credentials.</p>
+<fieldset class="endpoint-fields"><legend>Source</legend>
+<label>Source address<input name="sourceHost" placeholder="https://management.example.com" required autocomplete="off"></label>
+<label>Domain name or UID<input name="sourceDomain" autocomplete="off"><span class="field-help">For MDS only; leave empty for standalone management.</span></label>
+<label>Authentication<select name="sourceAuthMode"><option value="password">Username & password</option><option value="api-key">API key</option></select></label>
+<label>Username<input name="sourceUsername" autocomplete="username"></label>
+<label>Password<input name="sourcePassword" type="password" autocomplete="current-password"></label>
+<label>API key<input name="sourceApiKey" type="password" autocomplete="off"></label>
+<label class="check-row"><input name="sourceSmart1Cloud" type="checkbox"> Smart-1 Cloud tenant URL</label>
+<label class="check-row"><input name="sourceIgnoreTls" type="checkbox"> Allow unverified / self-signed TLS certificates</label>
+</fieldset>
+<fieldset class="endpoint-fields"><legend>Destination</legend>
+<label>Destination address<input name="targetHost" placeholder="https://management.example.com" required autocomplete="off"></label>
+<label>Domain name or UID<input name="targetDomain" autocomplete="off"><span class="field-help">For MDS only; leave empty for standalone management.</span></label>
+<label>Authentication<select name="targetAuthMode"><option value="password">Username & password</option><option value="api-key">API key</option></select></label>
+<label>Username<input name="targetUsername" autocomplete="username"></label>
+<label>Password<input name="targetPassword" type="password" autocomplete="current-password"></label>
+<label>API key<input name="targetApiKey" type="password" autocomplete="off"></label>
+<label class="check-row"><input name="targetSmart1Cloud" type="checkbox"> Smart-1 Cloud tenant URL</label>
+<label class="check-row"><input name="targetIgnoreTls" type="checkbox"> Allow unverified / self-signed TLS certificates</label>
+</fieldset>
+      </fieldset>
+      <details><summary>Management proxy (optional)</summary><label>HTTP or HTTPS proxy URL<input name="proxyUrl" type="password" autocomplete="off" placeholder="http://proxy.example.com:8080"><span class="field-help">Used for both endpoints. Optional user:password authentication stays in session memory.</span></label></details>
+      <p id="loginStatus" class="status-message" role="status"></p>
+      <button class="primary" type="submit" id="connectButton">Connect to MDS <span aria-hidden="true">→</span></button>
+    </form>
+  </section>
+  <section id="workspace" hidden>
+    <div class="connection-strip"><span><i class="connection-dot" aria-hidden="true"></i><strong id="connectionHost"></strong><span id="modeLabel" class="badge"></span></span><button id="logoutButton">Disconnect</button></div>
+    <section class="panel recovery-panel" aria-labelledby="recoveryHeading" id="recoveryPanel" hidden>
+      <div class="section-heading"><h2 id="recoveryHeading">Unfinished migrations</h2><p>Inspect the original Check Point session before making more changes to its destination.</p></div>
+      <button type="button" id="refreshRecovery">Check recovery records</button>
+      <p id="recoveryStatus" role="status"></p><div id="recoveryRecords"></div>
+    </section>
+    <div class="workbench">
+      <nav class="workbench-nav" aria-label="Migration workspace"><h2>Policy migration</h2>
+        <button data-view="setup" aria-pressed="true"><span class="nav-num">1</span> Domains & policy</button>
+        <button data-view="preflight" aria-pressed="false" disabled><span class="nav-num">2</span> Preflight checks <span id="navBlockers"></span></button>
+        <button data-view="objects" aria-pressed="false" disabled><span class="nav-num">3</span> Object changes</button>
+        <button data-view="rules" aria-pressed="false" disabled><span class="nav-num">4</span> Rulebase preview</button>
+        <button data-view="review" aria-pressed="false" disabled><span class="nav-num">5</span> Review & migrate</button>
+        <div class="nav-context"><h3>Migration safeguards</h3><p>Source policy retained</p><p>No automatic policy installation</p><p>Separate stage & publish</p></div>
+        <div class="nav-footer">Based on<br><a href="https://github.com/CheckPointSW/ExportImportPolicyPackage" target="_blank" rel="noreferrer">ExportImportPolicyPackage ↗</a><small>Dependency-based migration model</small></div>
+      </nav>
+      <div class="workbench-content">
+        <div id="workspaceStatus" class="workspace-status" role="status" hidden></div>
+        <section id="view-setup" class="view panel">
+          <div class="page-heading"><div><h1>Domains & policy</h1><p>Choose where the policy starts and where it should go.</p></div><span class="badge neutral">Step 1 of 5</span></div>
+          <details id="catalogPanel" class="raw-details">
+            <summary>API versions & migration coverage</summary>
+            <p>Check documented creation commands against our implemented migration adapters. New commands need dependency, comparison and verification support before they can be migrated.</p>
+            <div class="table-tools"><label>Documented API version<select id="catalogVersion"><option value="">Automatic · highest common supported</option></select></label><button type="button" id="catalogLoad">Check coverage</button><button type="button" id="catalogUpdate">Update official catalogs</button></div>
+            <p id="catalogStatus" role="status"></p>
+            <div class="table-scroll catalog-table"><table><thead><tr><th>Creation command</th><th>Migration support</th><th>Catalog change</th></tr></thead><tbody id="catalogRows"></tbody></table></div>
+          </details>
+          <form id="domainForm"><div class="domain-route"><label>Source domain<select id="sourceDomain" required></select><span class="field-help">Read-only source session</span></label><div class="route-arrow" aria-hidden="true">→</div><label>Destination domain<select id="targetDomain" required></select><span class="field-help">Dedicated migration session</span></label></div><button type="submit" id="loadPolicies">Load source policies</button></form>
+          <form id="previewForm" hidden><div class="section-heading"><h2>Select one policy package</h2><p>Only this package and its referenced dependencies are considered.</p></div><div class="form-row equal"><label>Source policy<select id="policySelect" required></select></label><label>Destination policy name<input id="targetName" required maxlength="100"></label></div>
+            <div id="demoScenarioRow" class="demo-scenarios" hidden><label>Sample scenario<select id="demoScenario"><option value="conflict">Object name conflict</option><option value="clean">Ready to migrate</option><option value="global">Global policy assigned</option></select></label><p>Synthetic scenarios exercise the same comparison and blocking rules.</p></div>
+            <details class="migration-options"><summary>Migration options</summary>
+              <label>Migration API version<input id="migrationApiVersion" placeholder="Automatic · highest common version" pattern="v?[0-9]+(\.[0-9]+){0,2}"><span class="field-help">Optional, for example v1.9. Every endpoint must support it. The reviewed version stays pinned through publish and recovery.</span></label>
+              <fieldset><legend>Policy components</legend><div class="option-checks">
+                <label><input type="checkbox" id="scopeAccess" checked> Access Control</label><label><input type="checkbox" id="scopeThreat" checked> Threat Prevention</label><label><input type="checkbox" id="scopeHttps" checked> HTTPS Inspection</label><label><input type="checkbox" id="scopeNat" checked> Manual NAT</label>
+              </div></fieldset>
+              <label class="option-check"><input type="checkbox" id="includeSections" checked> Preserve section headers</label>
+              <div class="form-row equal"><label>Suffix for imported objects<input id="objectSuffix" maxlength="100" placeholder="Optional, for example _MIGRATED"><span class="field-help">Built-in, DNS-domain and repository-defined names stay unchanged.</span></label><label>Tag new objects<input id="importTag" maxlength="100" placeholder="Optional migration tag"><span class="field-help">Existing objects reused by the policy are not modified.</span></label></div>
+              <p class="field-help">Automatic NAT follows required objects. These options also apply to archive previews.</p>
+            </details>
+            <div class="notice neutral"><b>Preview makes no changes.</b> The scan checks global assignments, inventories destination objects, resolves dependencies, and reads the selected policy components. Writable object fields are checked against the selected API version; unresolved dependencies and unknown settings require review.</div>
+            <div class="form-actions"><button type="submit" class="primary" id="previewButton">Scan & preview migration <span aria-hidden="true">→</span></button></div>
+          </form>
+          <section id="archivePanel" hidden aria-labelledby="archiveHeading">
+            <div class="section-heading"><h2 id="archiveHeading">Policy archives</h2><p>Export policy definitions or load an archive into the same preview, conflict resolution and staged migration workflow.</p></div>
+            <label>Export format<select id="archiveFormat"><option value="native">Native snapshot (.cma.gz)</option><option value="upstream">Python-compatible CSV archive (.tar.gz)</option></select></label>
+            <button type="button" id="archiveExport">Export selected source policy</button>
+            <label>Upload a policy archive (.cma.gz or upstream .tar.gz, up to 128 MiB)<input type="file" id="archiveFile" accept=".gz,application/gzip"></label>
+            <p id="archiveStatus" role="status">No archive loaded.</p><p id="archiveContents" class="field-help"></p>
+            <div class="form-actions"><button id="archiveDownload" type="button" hidden>Download archive</button><button id="archivePreview" type="button" disabled>Preview archive migration</button></div>
+            <p class="field-help">Uses the destination policy name above. Preview makes no changes; staging and publication remain separate.</p>
+          </section>
+        </section>
+        <div id="planWorkspace" hidden>
+          <div class="plan-route"><div><span>Source</span><strong id="routeSource"></strong></div><svg viewBox="0 0 40 16" aria-hidden="true"><path d="M0 8h36M29 1l7 7-7 7"/></svg><div><span>Destination</span><strong id="routeTarget"></strong></div><button id="rescanButton">Rescan</button></div>
+          <section id="view-preflight" class="view panel" hidden><div class="page-heading"><div><h1>Preflight checks</h1><p>Every gate must pass before the migration can be staged.</p></div><span id="planBadge" class="badge"></span></div><div id="preflightSummary"></div><div id="checks" class="check-list"></div><div class="section-heading"><h2>Migration at a glance</h2><p id="planDescription"></p></div><div id="changeSummary" class="change-summary"></div><div class="bottom-actions"><button class="primary" data-go="objects">Review object changes →</button><button data-action="export">Download plan</button></div></section>
+          <section id="view-objects" class="view panel" hidden><div class="page-heading"><div><h1>Object changes</h1><p>Compare definitions before creating or reusing any object.</p></div><button data-action="export">Download plan</button></div><div class="table-tools"><label class="search-label"><span class="sr-only">Search objects</span><input type="search" id="objectSearch" placeholder="Search by object name, type, or address"></label><label><span class="sr-only">Filter by outcome</span><select id="objectFilter"><option value="all">All objects</option><option value="create">To create</option><option value="reuse">To reuse</option><option value="conflict">Conflicts</option><option value="blocked">Unsupported</option></select></label><span id="objectCount" class="muted"></span><button id="renameAllConflicts" type="button">Rename all conflicts</button></div><p id="bulkRenameStatus" class="field-help" role="status">Adds _MIGRATED to incoming names. Exact definition matching and name uniqueness checks still apply.</p><div class="table-scroll"><table class="object-table"><thead><tr><th>Object</th><th>Type</th><th>Source definition</th><th>Destination</th><th>Outcome</th><th><span class="sr-only">Details</span></th></tr></thead><tbody id="objectsBody"></tbody></table></div><div id="objectDetail" class="object-detail" hidden></div><div class="bottom-actions"><button class="primary" data-go="rules">Preview rulebase →</button><p>Resolve name conflicts by renaming the incoming object. Existing destination objects stay unchanged.</p></div></section>
+          <section id="view-rules" class="view panel" hidden><div class="page-heading"><div><h1>Rulebase preview</h1><p>Proposed rule order and object references in the destination.</p></div><span class="badge neutral" id="ruleCount"></span></div><div class="table-tools"><label>Policy layer<select id="layerSelect"></select></label><div class="rule-legend"><span class="badge create">New object</span><span class="badge reuse">Reused object</span><span class="badge conflict">Unresolved</span></div></div><div id="ruleWarning"></div><div class="table-scroll"><table class="rules-table"><thead id="rulesHead"></thead><tbody id="rulesBody"></tbody></table></div><details class="raw-details"><summary>Layer settings and original API response</summary><pre id="rawRules"></pre></details><div class="bottom-actions"><button class="primary" data-go="review">Review migration →</button><p>Section boundaries, disabled rules and inline layers are preserved.</p></div></section>
+          <section id="view-review" class="view panel" hidden><div class="page-heading"><div><h1>Review & migrate</h1><p>Stage the reviewed plan in a dedicated destination session.</p></div><span class="badge neutral">Step 5 of 5</span></div><div id="reviewSummary"></div><div class="migration-sequence"><div><b>1. Stage</b><span>Create objects, layers and rules. Verify staged rules.</span></div><div><b>2. Review</b><span>Inspect unpublished changes in SmartConsole.</span></div><div><b>3. Publish</b><span>Commit the destination changes when ready.</span></div></div><div id="reviewGate"></div><form id="stageForm"><label>Type the destination policy name to confirm<input id="confirmName" autocomplete="off" spellcheck="false"></label><label class="check-row"><input type="checkbox" id="confirmReviewed"> I have reviewed the objects and complete rulebase.</label><button type="submit" id="stageButton" class="primary" disabled>Stage migration</button></form><div id="jobPanel" hidden><h2 id="jobTitle"></h2><p id="jobMessage" role="status"></p><button id="reconcileButton" hidden>Check publish task status</button><div id="finishActions" hidden><p>Publishing commits these changes. It does not install the policy on gateways.</p><button id="publishButton" class="primary">Publish destination changes</button><button id="discardButton">Discard staged changes</button></div><details class="raw-details"><summary>Operation log & raw task response</summary><pre id="jobLog"></pre></details></div></section>
+        </div>
+      </div>
+    </div>
+  </section>
+  <footer class="app-footer"><span>Local workbench · Native policy migration</span><a href="https://github.com/CheckPointSW/ExportImportPolicyPackage" target="_blank" rel="noreferrer">Upstream project ↗</a></footer>
+</main>
+<dialog id="confirmDialog"><form method="dialog"><h2 id="dialogTitle"></h2><p id="dialogMessage"></p><label>Confirm destination policy<input id="finishName" autocomplete="off"></label><div class="bottom-actions"><button value="cancel">Cancel</button><button value="confirm" id="dialogConfirm" class="primary" disabled>Confirm</button></div></form></dialog>
+<script type="module" src="/app.js"></script>
+</body></html>

@@ -1,0 +1,993 @@
+import csv
+import os
+import tarfile
+import sys
+import copy
+from functools import cmp_to_key
+
+from lists_and_dictionaries import (singular_to_plural_dictionary, generic_objects_for_rule_fields, import_priority,
+                                    https_blades_names_map,
+                                    commands_support_batch, rule_support_batch, not_unique_name_with_dedicated_api,
+                                    types_not_support_tagging)
+from utils import debug_log, create_payload, compare_versions, generate_new_dummy_ip_address, get_reply_err_msg
+
+duplicates_dict = {}
+position_decrements_for_sections = []
+missing_parameter_set = set()
+should_create_imported_nat_top_section = True
+should_create_imported_nat_bottom_section = True
+updatable_objects_repository_initliazed = False
+imported_nat_top_section_uid = None
+name_collision_map = {}
+changed_object_names_map = {}
+commands_batch_version = "1.6"
+rules_batch_version = "1.8.1"
+api_current_version = None
+add_tag_to_object_uid = None
+imported_exception_groups = []
+
+
+def clone_globals_batch_rulebase():
+    global should_create_imported_nat_top_section
+    global should_create_imported_nat_bottom_section
+    global imported_nat_top_section_uid
+    return copy.copy(should_create_imported_nat_top_section), copy.copy(should_create_imported_nat_bottom_section), \
+           copy.copy(imported_nat_top_section_uid)
+
+
+def revert_to_before_rule_batch(should_create_imported_nat_top_section_clone,
+                                    should_create_imported_nat_bottom_section_clone, imported_nat_top_section_uid_clone):
+    global should_create_imported_nat_top_section
+    global should_create_imported_nat_bottom_section
+    global imported_nat_top_section_uid
+
+    if should_create_imported_nat_top_section != should_create_imported_nat_top_section_clone:
+        should_create_imported_nat_top_section = should_create_imported_nat_top_section_clone
+
+    if should_create_imported_nat_bottom_section != should_create_imported_nat_bottom_section_clone:
+        should_create_imported_nat_bottom_section = should_create_imported_nat_bottom_section_clone
+
+    if imported_nat_top_section_uid != imported_nat_top_section_uid_clone:
+        imported_nat_top_section_uid = imported_nat_top_section_uid_clone
+
+
+def is_support_batch(api_type, version):
+    return api_type in commands_support_batch and compare_versions(version, commands_batch_version) != -1
+
+
+def is_support_rule_batch(api_type, version):
+    return api_type in rule_support_batch and compare_versions(version, rules_batch_version) != -1
+
+
+def import_objects(file_name, client, changed_layer_names, package, layer=None, args=None):
+    global position_decrements_for_sections
+    global api_current_version
+
+    export_tar = tarfile.open(file_name, "r:gz")
+    export_tar.extractall()
+    tar_files = export_tar.getmembers()
+
+    general_object_files = [general_object_file for general_object_file in tar_files if
+                            os.path.splitext(general_object_file.name)[1] == ".csv" or
+                            os.path.splitext(general_object_file.name)[1] == ".json"]
+
+    rulebase_object_files = [general_object_file for general_object_file in tar_files if
+                             os.path.splitext(general_object_file.name)[1] == ".gz"]
+
+    general_object_files.sort(key=cmp_to_key(compare_general_object_files))
+
+    layers_to_attach = {"access": [], "threat": [], "https": []}
+
+    if not general_object_files:
+        debug_log("Nothing to import...", True)
+
+    version_file_name = [f for f in tar_files if f.name == "version.txt"][0]
+    version_support_batch = False
+    version_support_rule_batch = False
+    if api_current_version is None:
+        api_versions = client.api_call("show-api-versions")
+        if api_versions.success and "current-version" in api_versions.data:
+            api_current_version = api_versions.data["current-version"]
+    with open(version_file_name.name, 'rb') as version_file:
+        version = version_file.readline()
+        if isinstance(version, bytes):
+            version = version.decode("utf-8")
+        api_versions = client.api_call("show-api-versions")
+        if not api_versions.success:
+            debug_log("Error getting versions! Aborting import. " + str(api_versions), True, True)
+            sys.exit(1)
+        version_to_use = None
+        if version in api_versions.data["supported-versions"]:
+            client.api_version = version
+            version_to_use = version
+        else:
+            debug_log(
+                "The version of the imported package doesn't exist in this machine! import with this machines latest version. ",
+                True, True)
+            if "current-version" in api_versions.data:
+                version_to_use = api_versions.data["current-version"]
+        if version_to_use is not None and compare_versions(version_to_use, commands_batch_version) != -1:
+            version_support_batch = True
+        if version_to_use is not None and compare_versions(version_to_use, rules_batch_version) != -1:
+            version_support_rule_batch = True
+    for general_object_file in general_object_files:
+        _, file_extension = os.path.splitext(general_object_file.name)
+        if file_extension != ".csv":
+            os.remove(general_object_file.name)
+            continue
+        api_call = general_object_file.name.split('__')[2]
+        counter = 1
+        position_decrement_due_to_rules = 0
+        position_decrement_due_to_sections = 0
+        generic_type = None
+        data = []
+        if "generic" in api_call:
+            generic_type = api_call.split("-")[3]
+            api_call = "-".join(api_call.split("-")[0:3])
+        api_type = generic_type if generic_type else '-'.join(api_call.split('-')[1:])
+        if args.skip_import_sections and "section" in api_type:
+            debug_log("Skip import {0}".format(api_type), True)
+            continue
+        if api_type == "access-rule" or api_type == "https-rule":
+            position_decrements_for_sections = []
+        debug_log("Adding " + (singular_to_plural_dictionary[client.api_version][api_type].replace('_', ' ')
+                               if api_type in singular_to_plural_dictionary[
+            client.api_version] else "generic objects of type " + api_type), True)
+
+        with open(general_object_file.name, 'rt') as csv_file:
+            reader = csv.reader(csv_file)
+            num_objects = len(list(reader)) - 1
+            csv_file.seek(0)
+
+            fields = next(reader)
+
+            while True:
+                line = next(reader, None)
+                if line is None:
+                    break
+                line = [str(item) for item in line]
+                data.append(line)
+
+        os.remove(general_object_file.name)
+
+        client_version = client.api_version
+        if api_current_version is not None:
+            if is_support_batch(api_type, api_current_version):
+                if compare_versions(client.api_version, commands_batch_version) == -1:
+                    client.api_version = api_current_version
+                version_support_batch = True
+            elif is_support_rule_batch(api_type, api_current_version):
+                if compare_versions(client.api_version, rules_batch_version) == -1:
+                    client.api_version = api_current_version
+                version_support_rule_batch = True
+
+        support_batch = api_type in commands_support_batch and version_support_batch
+        support_rule_batch = api_type in rule_support_batch and version_support_rule_batch
+
+        should_create_imported_nat_top_section_clone = None
+        should_create_imported_nat_bottom_section_clone = None
+        imported_nat_top_section_uid_clone = None
+        do_rule_batch_revert = False
+        batch_succeeded = False
+
+        if support_batch or support_rule_batch:
+            is_rule_type = api_type in rule_support_batch
+            if is_rule_type:
+                should_create_imported_nat_top_section_clone, should_create_imported_nat_bottom_section_clone, \
+                imported_nat_top_section_uid_clone = clone_globals_batch_rulebase()
+                do_rule_batch_revert = True
+
+            batch_payload = create_batch_payload(api_type, data, fields, client, args, is_rule_type,
+                                                 changed_layer_names, generic_type, layer, layers_to_attach, package)
+            command = "add-objects-batch"
+            if is_rule_type:
+                command = "add-rules-batch"
+            batch_succeeded = add_batch_objects(api_type, command, client, args, batch_payload)
+
+        client.api_version = client_version
+        if not batch_succeeded:
+            if do_rule_batch_revert:
+                # Revert rule batch globals
+                revert_to_before_rule_batch(should_create_imported_nat_top_section_clone,
+                                                should_create_imported_nat_bottom_section_clone,
+                                                imported_nat_top_section_uid_clone)
+
+            for line in data:
+                counter, position_decrement_due_to_rules = add_object(line, counter, position_decrement_due_to_rules,
+                                                                      position_decrement_due_to_sections, fields, api_type,
+                                                                      generic_type, layer, layers_to_attach,
+                                                                  changed_layer_names, api_call, num_objects, client, args, package)
+
+    for rulebase_object_file in rulebase_object_files:
+        layer_type = rulebase_object_file.name.split("__")[1]
+        layer_name = '__'.join(rulebase_object_file.name.split('__')[2:-1])
+        if layer_name in changed_layer_names:
+            layer_name = changed_layer_names[layer_name]
+        debug_log("Importing " + layer_type.split('_')[0].capitalize() + "_" + layer_type.split('_')[1].capitalize() +
+                  " [" + layer_name + "]", True)
+        import_objects(rulebase_object_file.name, client, changed_layer_names, package, layer_name, args)
+        os.remove(rulebase_object_file.name)
+
+    return layers_to_attach
+
+
+def add_tag_to_object_payload(tag_name, payload, api_type, client):
+    # types don't support tagging
+    for type_not_support_tagging in types_not_support_tagging:
+        if type_not_support_tagging in api_type:  # can be sub-string of api_type (e.g. rule)
+            return
+
+    global add_tag_to_object_uid
+    if add_tag_to_object_uid is None:
+        tag_data = find_tag_by_name(tag_name, client)
+        if tag_data is not None:
+            add_tag_to_object_uid = tag_data['uid']
+        else:
+            # Tag not exists
+            add_tag = client.api_call("add-tag", {"name": tag_name})
+            if add_tag.success:
+                publish = client.api_call("publish", {})
+                if publish.success:
+                    add_tag_to_object_uid = add_tag.data['uid']
+            else:
+                debug_log("Failed to add tag [{}] to objects. [{}]".format(tag_name,
+                                                                           add_tag.error_message), True, True)
+    # Add tag to payload
+    if add_tag_to_object_uid is not None:
+        payload_tags = payload["tags"] if "tags" in payload else []
+        payload_tags.append(add_tag_to_object_uid)
+        payload["tags"] = payload_tags
+
+
+def find_tag_by_name(tag_name, client):
+    query_tags = client.api_call("show-objects", payload={"type": "tag", "filter": tag_name})
+    if query_tags.success:
+        if len(query_tags.data['objects']) > 0:
+            for tag_obj in query_tags.data['objects']:
+                if tag_obj['name'] == tag_name:
+                    return tag_obj
+    return None
+
+
+def handle_import_tags(payload, api_type, client):
+    exported_tags = payload["tags"]
+    tags_to_import = []
+    unresolved_tags = []
+    for tag in exported_tags:
+        tag_name = None
+        if isinstance(tag, dict):
+            if "name" in tag:
+                tag_name = str(tag["name"])
+
+        if tag_name is None or tag_name == "":
+            debug_log("Unknown tag name for object [{0}]".format(payload["name"] if "name" in payload else api_type),
+                      True, True)
+        else:
+            add_tag_to_payload = False
+            tag_data = find_tag_by_name(tag_name, client)
+            if tag_data is not None:
+                tag_name = tag_data['uid']
+                add_tag_to_payload = True
+            else:
+                # Tag not exists
+                reply = client.api_call("add-tag", tag)
+                if reply.success:
+                    add_tag_to_payload = True
+
+            if add_tag_to_payload:
+                tags_to_import.append(tag_name)
+            else:
+                unresolved_tags.append(tag_name)
+
+    if len(unresolved_tags) > 0:
+        debug_log("Failed to add tags {0} for object [{1}]".format(unresolved_tags, payload["name"]), True, True)
+
+    if len(tags_to_import) > 0:
+        payload["tags"] = tags_to_import
+
+
+def add_object(line, counter, position_decrement_due_to_rule, position_decrement_due_to_section, fields, api_type,
+               generic_type, layer, layers_to_attach,
+               changed_layer_names, api_call, num_objects, client, args, package):
+    global duplicates_dict
+    global position_decrements_for_sections
+    global missing_parameter_set
+    global should_create_imported_nat_top_section
+    global should_create_imported_nat_bottom_section
+    global imported_nat_top_section_uid
+
+    if "access-rule" in api_type or "https-rule" in api_type:
+        position_decrements_for_sections.append(position_decrement_due_to_rule)
+
+    payload, _ = create_payload(fields, line, 0, api_type, client.api_version)
+    if args is not None and args.objects_suffix != "":
+        add_suffix_to_objects(payload, api_type, args.objects_suffix)
+
+    # for objects that had collisions, use new name in the imported package
+    for field in ["members", "source", "destination"]:
+        if field in payload:
+            for i, member in enumerate(payload[field]):
+                if api_type == 'simple-cluster':
+                    if member['name'] in name_collision_map:
+                        payload[field][i]['name'] = name_collision_map[member['name']]
+                else:
+                    if member in name_collision_map:
+                        payload[field][i] = name_collision_map[member]
+
+    payload["ignore-warnings"] = True  # Useful for example when creating two hosts with the same IP
+
+    if "threat-profile" in api_type:
+        if "scan-malicious-links" in payload:
+            payload.pop("scan-malicious-links")
+            debug_log("Not importing scan-malicious-links, value is not supported. Setting with default value", True, True)
+
+    if "exception-group" in api_type:
+        name_to_check = payload["name"] if payload["name"] not in name_collision_map else name_collision_map[payload["name"]]
+        if name_to_check not in imported_exception_groups:
+            i = 0
+            original_name = payload["name"]
+            api_reply = client.api_call("show-exception-group", {"name": payload["name"]})
+            was_renamed = False
+            while api_reply.success and args is not None and not args.skip_duplicate_objects:
+                was_renamed = True
+                payload["name"] = "NAME_COLLISION_RESOLVED" + ("_" if i == 0 else "_%s_" % i) + original_name
+                api_reply = client.api_call("show-exception-group", {"name": payload["name"]})
+                i += 1
+
+                if i > 100:
+                    payload["name"] = original_name
+                    was_renamed = False
+                    break
+
+            if api_reply.success and args is not None and args.skip_duplicate_objects:
+                debug_log("skip duplicate object [{0}]".format(payload["name"]), True, True)
+            elif not api_reply.success and was_renamed is True:
+                debug_log("Object \"%s\" was renamed to \"%s\" to resolve the name collision"
+                          % (original_name, payload["name"]), True, True)
+                name_collision_map[original_name] = payload["name"]
+
+    if "nat-rule" in api_type:
+        # For NAT rules, the 'package' parameter is the name of the policy package!!!
+        if package is None:
+            debug_log("Internal error: package name is unknown", True, True)
+        payload["package"] = package
+        # --- NAT rules specific logic ---
+        # Importing only rules, without sections.
+        # Rules marked as "__before_auto_rules = TRUE" will be imported at the TOP of the rulebase, inside a new section "IMPORTED UPPER RULES".
+        # There is an additional new section "Original Upper Rules" at the bottom of "IMPORTED UPPER RULES".
+        # Rules marked as "__before_auto_rules = FALSE" will be imported at the BOTTOM of the rulebase, inside a new section "IMPORTED LOWER RULES".
+        # There will be no rule merges!!!
+        before_auto_rules = payload["__before_auto_rules"]
+        payload.pop("__before_auto_rules", None)
+        if "true" in before_auto_rules:
+            if should_create_imported_nat_top_section:
+                should_create_imported_nat_top_section = False
+                nat_section_payload = {}
+                nat_section_payload["package"] = package
+                nat_section_payload["position"] = "top"
+                # --> we add the footer section first!!!
+                nat_section_payload["name"] = "Original Upper Rules"
+                client.api_call("add-nat-section", nat_section_payload)
+                # <--
+                nat_section_payload["name"] = "IMPORTED UPPER RULES"
+                nat_section_reply = client.api_call("add-nat-section", nat_section_payload)
+                if nat_section_reply.success:
+                    imported_nat_top_section_uid = nat_section_reply.data["uid"]
+            if imported_nat_top_section_uid is None:
+                payload["position"] = "bottom"
+            else:
+                sub_payload = {}
+                sub_payload["bottom"] = imported_nat_top_section_uid
+                payload["position"] = sub_payload
+        else:
+            if should_create_imported_nat_bottom_section:
+                should_create_imported_nat_bottom_section = False
+                nat_section_payload = {}
+                nat_section_payload["package"] = package
+                nat_section_payload["position"] = "bottom"
+                nat_section_payload["name"] = "IMPORTED LOWER RULES"
+                client.api_call("add-nat-section", nat_section_payload)
+            payload["position"] = "bottom"
+    else:
+        if "position" in payload:
+            if "rule" in api_type or api_type == "threat-exception":
+                payload["position"] = str(int(payload["position"]) - position_decrement_due_to_rule)
+            if "rule" in api_type:
+                if payload["action"] == "Drop":
+                    if "action-settings" in payload:
+                        payload.pop("action-settings")
+                    if "user-check" in payload:
+                        if "frequency" in payload["user-check"]:
+                            payload["user-check"].pop("frequency")
+                        if "custom-frequency" in payload["user-check"]:
+                            payload["user-check"].pop("custom-frequency")
+                        if "confirm" in payload["user-check"]:
+                            payload["user-check"].pop("confirm")
+            if "section" in api_type:
+                section_position_decrement = (position_decrements_for_sections[int(payload["position"]) - 1] if len(
+                    position_decrements_for_sections) > 0 else 0) + position_decrement_due_to_section
+                payload["position"] = str(int(payload["position"]) - section_position_decrement)
+
+        if generic_type:
+            payload["create"] = generic_type
+        if "layer" in api_type:
+            check_duplicate_layer(payload, changed_layer_names, api_type, client)
+            if compare_versions(client.api_version, "1.1") != -1 and "https" not in api_type:
+                payload["add-default-rule"] = "false"
+            if layer is None:
+                if "access-layer" in api_type:
+                    #---> This code segment distinguishes between an inline layer and an ordered layer during import
+                    is_ordered_access_control_layer = payload["__ordered_access_control_layer"]
+                    payload.pop("__ordered_access_control_layer", None)
+                    if "true" in is_ordered_access_control_layer:
+                        layers_to_attach["access"].append(payload["name"])   # ordered access layer
+                    #<--- end of code segment
+                elif "threat-layer" in api_type:
+                    layers_to_attach["threat"].append(payload["name"])
+                elif "https-layer" in api_type:
+                    layers_to_attach["https"].append(payload["name"])
+        elif "rule" in api_type or "section" in api_type or \
+                (api_type == "threat-exception" and "exception-group-name" not in payload):
+            payload["layer"] = layer
+            if args is not None and args.objects_suffix != "":
+                payload["layer"] += args.objects_suffix
+                if payload["layer"] in changed_layer_names:
+                    payload["layer"] = changed_layer_names[payload["layer"]]
+            if client.api_version != "1" and api_type == "access-rule" and "track-alert" in payload:
+                payload["track"] = {}
+                payload["track"]["alert"] = payload["track-alert"]
+                payload.pop("track-alert", None)
+        elif api_type == "exception-group" and "applied-threat-rules" in payload:
+            for applied_rule in payload["applied-threat-rules"]:
+                if applied_rule["layer"] in changed_layer_names.keys():
+                    applied_rule["layer"] = changed_layer_names[applied_rule["layer"]]
+        elif api_type == "threat-exception" and "exception-group-name" in payload:
+            if payload["exception-group-name"] in name_collision_map:
+                payload["exception-group-name"] = name_collision_map[payload["exception-group-name"]]
+
+    if "updatable-object" in api_type:
+        global updatable_objects_repository_initliazed
+        if not updatable_objects_repository_initliazed:
+            updatable_objects_repository_reply = client.api_call("update-updatable-objects-repository-content", wait_for_task=True)
+            if updatable_objects_repository_reply.success:
+                updatable_objects_repository_initliazed = True
+            else:
+                if hasattr(updatable_objects_repository_reply, "error_message"):
+                    debug_log(
+                        "Failed to update updatable objects repository \"%s\"" % updatable_objects_repository_reply.error_message,
+                        True, True)
+                else:
+                    debug_log(
+                        "Failed to update updatable objects repository \"%s\"" % updatable_objects_repository_reply,
+                        True, True)
+
+        updatable_object_payload = {}
+        if "uid-in-updatable-objects-repository" in payload:
+            updatable_object_payload["uid-in-updatable-objects-repository"] = payload[
+                "uid-in-updatable-objects-repository"]
+        elif "uid-in-data-center" in payload:
+            updatable_object_payload["uid-in-updatable-objects-repository"] = payload["uid-in-data-center"]
+        if "tags" in payload:
+            updatable_object_payload["tags"] = payload["tags"]
+        if "comments" in payload:
+            updatable_object_payload["comments"] = payload["comments"]
+        if "color" in payload:
+            updatable_object_payload["color"] = payload["color"]
+        payload = updatable_object_payload
+    elif "https-rule" in api_type:
+        if "blade" in payload and len(payload["blade"]) > 0:
+            if len(payload["blade"]) == 1 and payload["blade"][0] == "All":
+                del payload["blade"]
+            else:
+                exported_blades = payload["blade"]
+                blades_to_import = []
+                for blade in exported_blades:
+                    if blade in https_blades_names_map:
+                        blades_to_import.append(https_blades_names_map[blade])
+                    else:
+                        blades_to_import.append(blade)
+                payload["blade"] = blades_to_import
+
+    if "tags" in payload:
+        handle_import_tags(payload, api_type, client)
+
+    if args is not None and args.tag_objects_on_import != "":
+        add_tag_to_object_payload(args.tag_objects_on_import, payload, api_type, client)
+
+    if api_type == "exception-group":
+        api_reply = client.api_call("show-exception-group", {"name": payload["name"]})
+        if api_reply.success:
+            api_call = "set-exception-group"
+            if payload["name"] in name_collision_map:
+                payload["name"] = name_collision_map[payload["name"]]
+            if "applied-threat-rules" in payload:
+                add_rules = payload["applied-threat-rules"].copy()
+                applied_threat_rules = {"add": add_rules}
+                payload["applied-threat-rules"] = applied_threat_rules
+
+    api_reply = client.api_call(api_call, payload)
+    reply_err_msg = get_reply_err_msg(api_reply)
+
+    if not api_reply.success and "name" in payload and "More than one object" in reply_err_msg:
+        if args is not None and not args.skip_duplicate_objects:
+            i = 0
+            original_name = payload["name"]
+            while not api_reply.success and payload["name"] in reply_err_msg:
+                payload["name"] = "NAME_COLLISION_RESOLVED" + ("_" if i == 0 else "_%s_" % i) + original_name
+                api_reply = client.api_call(api_call, payload)
+                reply_err_msg = get_reply_err_msg(api_reply)
+                i += 1
+
+                if i > 100:
+                    payload["name"] = original_name
+                    break
+
+            # it's possible that at least one of the members' name might've caused collision
+            if api_type == "simple-cluster" and not api_reply.success and 'members' in payload:
+                # since the members param is a list and the name-uniqueness-validation goes through the members by order
+                # we can do so as well and catch multiple collisions
+                for index, member in enumerate(payload['members']):
+                    iter_num = 0
+                    member_orig_name = member['name']
+                    while not api_reply.success and "More than one object" in reply_err_msg and payload['members'][index]['name'] in reply_err_msg:
+                        payload['members'][index]['name'] = "NAME_COLLISION_RESOLVED" + ("_" if iter_num == 0 else "_%s_" % iter_num) + member_orig_name
+                        api_reply = client.api_call(api_call, payload)
+                        reply_err_msg = get_reply_err_msg(api_reply)
+                        iter_num += 1
+
+                        if iter_num > 100:
+                            payload['members'][index]['name'] = member_orig_name
+                            break
+
+                    if api_reply.success or ("More than one object" in reply_err_msg and
+                                             payload['members'][index]['name'] not in reply_err_msg):
+                        # there might be another collision with a different member than the one that was fixed
+                        debug_log("Cluster Member \"%s\" of Simple-Cluster \"%s\" was renamed to \"%s\" to resolve the name collision"
+                                  % (member_orig_name, payload["name"], payload['members'][index]['name']), True, True)
+                        name_collision_map[member_orig_name] = payload['members'][index]['name']
+                        if api_reply.success:
+                            break
+
+            if api_reply.success and original_name != payload["name"]:
+                debug_log("Object \"%s\" was renamed to \"%s\" to resolve the name collision"
+                          % (original_name, payload["name"]), True, True)
+                name_collision_map[original_name] = payload["name"]
+        else:
+            api_reply.success = True
+            debug_log("skip duplicate object [{0}]".format(payload["name"]), True, True)
+
+    if not api_reply.success:
+        if api_reply.data and "errors" in api_reply.data:
+            error_msg = api_reply.data["errors"][0]["message"]
+        elif api_reply.data and "warnings" in api_reply.data:
+            error_msg = api_reply.data["warnings"][0]["message"]
+        else:
+            error_msg = get_reply_err_msg(api_reply)
+        log_err_msg = ""
+        try:
+            log_err_msg = "Failed to import {0}{1}. Error: {2}".format(api_type, " with name [" + str(payload[
+                "name"]).strip() + "]" if "name" in payload else "", error_msg)
+        except UnicodeEncodeError:
+            log_err_msg = "Failed to import {0} object. Error: {1}".format(api_type, error_msg)
+
+        reply_err_msg = get_reply_err_msg(api_reply)
+
+        if "More than one object" in reply_err_msg:
+            log_err_msg = reply_err_msg + ". Cannot import this object"
+
+        if "Object is already imported. please use the existing object" in reply_err_msg:
+            return counter, position_decrement_due_to_rule
+
+        if "rule" in api_type and (
+                        "Requested object" in reply_err_msg and "not found" in reply_err_msg):
+            field_value = reply_err_msg.split("[")[1].split("]")[0]
+            indices_of_field = [i for i, x in enumerate(line) if x == field_value]
+            field_keys = [x for x in fields if fields.index(x) in indices_of_field]
+            for field_key in field_keys:
+                if field_key.split(".")[0] in generic_objects_for_rule_fields:
+                    missing_obj_data = generic_objects_for_rule_fields[field_key.split(".")[0]]
+                    missing_type = missing_obj_data[0]
+                    mandatory_field = missing_obj_data[1] if len(missing_obj_data) > 1 else None
+                    add_missing_command = "add-" + missing_type
+                    new_name = "import_error_due_to_missing_fields_" + field_value.replace(" ", "_")
+                    add_succeeded = True
+                    if new_name not in missing_parameter_set:
+                        missing_parameter_set.add(new_name)
+                        add_missing_payload = {"name": new_name}
+                        if mandatory_field == "port":
+                            add_missing_payload["port"] = "8080"
+                        elif mandatory_field == "ip-address":
+                            add_missing_payload["ip-address"] = generate_new_dummy_ip_address()
+                        add_missing_reply = client.api_call(add_missing_command, add_missing_payload)
+                        if not add_missing_reply.success:
+                            log_err_msg += "\nAlso failed to generate placeholder object: {0}".format(
+                                get_reply_err_msg(add_missing_reply))
+                            add_succeeded = False
+                    if add_succeeded:
+                        line[fields.index(field_key)] = new_name
+                        return add_object(line, counter, position_decrement_due_to_rule,
+                                          position_decrement_due_to_section, fields, api_type, generic_type, layer,
+                                          layers_to_attach,
+                                          changed_layer_names, api_call, num_objects, client, args, package)
+        if "Invalid parameter for [position]" in reply_err_msg and "exception-group" not in api_type:
+            if "access-rule" in api_type or "https-rule" or "threat-exception" in api_type:
+                position_decrement_due_to_rule += adjust_position_decrement(int(payload["position"]), reply_err_msg)
+            elif "access-section" in api_type or "https-section" in api_type:
+                position_decrement_due_to_section += adjust_position_decrement(int(payload["position"]), reply_err_msg)
+            return add_object(line, counter, position_decrement_due_to_rule, position_decrement_due_to_section, fields,
+                              api_type, generic_type, layer,
+                              layers_to_attach,
+                              changed_layer_names, api_call, num_objects, client, args, package)
+        elif "is not unique" in reply_err_msg and "name" in reply_err_msg:
+            field_value = reply_err_msg.partition("name")[2].split("[")[1].split("]")[0]
+            debug_log("Not unique name problem \"%s\" - changing payload to use UID instead." % field_value, True, True)
+            obj_uid_found_and_used = False
+            if field_value not in duplicates_dict:
+                if field_value in not_unique_name_with_dedicated_api:
+                    debug_log("Found not unique name: \"%s\", using dedicated API: \"%s\""% (field_value, not_unique_name_with_dedicated_api[field_value]), True, True)
+                    show_objects_reply = client.api_call(not_unique_name_with_dedicated_api[field_value], {"name": field_value})
+                    if show_objects_reply.success:
+                        duplicates_dict[field_value] = show_objects_reply.data["uid"]
+                        obj_uid_found_and_used = True
+                if not obj_uid_found_and_used:
+                    show_objects_reply = client.api_query("show-objects",
+                                                     payload={"in": ["name", "\"" + field_value + "\""]})
+                    if show_objects_reply.success:
+                        for obj in show_objects_reply.data:
+                            if obj["name"] == field_value:
+                                duplicates_dict[field_value] = obj["uid"]
+                                obj_uid_found_and_used = True
+            else:
+                obj_uid_found_and_used = True
+            if obj_uid_found_and_used:
+                indices_of_field = [i for i, x in enumerate(line) if x == field_value]
+                field_keys = [x for x in fields if fields.index(x) in indices_of_field]
+                for field_key in field_keys:
+                    line[fields.index(field_key)] = duplicates_dict[field_value]
+                return add_object(line, counter, position_decrement_due_to_rule, position_decrement_due_to_section, fields,
+                                  api_type, generic_type, layer, layers_to_attach,
+                                  changed_layer_names, api_call, num_objects, client, args, package)
+            else:
+                debug_log("Not unique name problem \"%s\" - cannot change payload to use UID instead of name." % field_value, True, True)
+        elif "will place the exception in an Exception-Group" in reply_err_msg:
+            return add_object(line, counter, position_decrement_due_to_rule - 1, position_decrement_due_to_section,
+                              fields, api_type, generic_type, layer, layers_to_attach,
+                              changed_layer_names, api_call, num_objects, client, args, package)
+
+        position_decrement_due_to_rule += 1
+
+        debug_log(log_err_msg, True, True)
+        if args is not None and args.strict:
+            discard_reply = client.api_call("discard")
+            if not discard_reply.success:
+                debug_log("Failed to discard changes! Terminating. Error: " + get_reply_err_msg(discard_reply),
+                          True, True)
+            exit(1)
+    else:
+        imported_name = payload["name"] if "name" in payload else ""
+        if api_call == "add-exception-group":
+            imported_exception_groups.append(imported_name)
+        debug_log("Imported {0}{1}".format(api_type, " with name [" + imported_name + "]"))
+        if counter % 20 == 0 or counter == num_objects:
+            percentage = int(float(counter) / float(num_objects) * 100)
+            debug_log("Imported {0} out of {1} {2} ({3}%)".format(counter, num_objects,
+                                                                  singular_to_plural_dictionary[client.api_version][
+                                                                      api_type] if api_type in
+                                                                                   singular_to_plural_dictionary[
+                                                                                       client.api_version] else "generic objects",
+                                                                  percentage), True)
+            if counter % 100 == 0 or counter == num_objects:
+                publish_reply = client.api_call("publish", wait_for_task=True)
+                if not publish_reply.success:
+                    publish_reply_err_msg = get_reply_err_msg(publish_reply)
+                    plural = singular_to_plural_dictionary[client.api_version][api_type].replace('_', ' ') \
+                        if api_type in singular_to_plural_dictionary[client.api_version] \
+                        else "generic objects of type " + api_type
+                    try:
+                        debug_log("Failed to publish import of " + plural + " from tar file #" +
+                                  str((counter / 100) + 1) + "! " + plural.capitalize() +
+                                  " from said file were not imported!. Error: " + publish_reply_err_msg,
+                                  True, True)
+                    except UnicodeEncodeError:
+                        try:
+                            debug_log("UnicodeEncodeError: " + publish_reply_err_msg, True, True)
+                        except:
+                            debug_log("UnicodeEncodeError: .encode('utf-8') FAILED", True, True)
+
+                    discard_reply = client.api_call("discard")
+                    if not discard_reply.success:
+                        debug_log("Failed to discard changes of unsuccessful publish! Terminating. Error: " +
+                                  get_reply_err_msg(discard_reply), True, True)
+                        exit(1)
+
+    return counter + 1, position_decrement_due_to_rule
+
+
+# This is a duplicate code from function add_object
+def create_batch_payload(api_type, data, fields, client, args, is_rule_type, changed_layer_names,
+                         generic_type, layer, layers_to_attach, package):
+    batch_payload = {'objects': [{
+        'type': api_type,
+        'list': []
+    }]}
+
+    if is_rule_type:
+        if api_type == "nat-rule":
+            batch_payload['objects'][0]['layer'] = package
+            batch_payload['objects'][0]['first-position'] = "bottom"
+        else:
+            batch_payload['objects'][0]['layer'] = layer
+            batch_payload['objects'][0]['first-position'] = "top"
+
+    list_of_objects = batch_payload['objects'][0]['list']
+    for line in data:
+        payload, _ = create_payload(fields, line, 0, api_type, client.api_version)
+        update_payload_batch(client, payload, api_type, args, is_rule_type, changed_layer_names, package,
+                             generic_type, layer, layers_to_attach)
+        list_of_objects.append(payload)
+    return batch_payload
+
+
+def update_payload_batch(client, payload, api_type, args, is_rule_type, changed_layer_names, package, generic_type,
+                         layer, layers_to_attach):
+    if args is not None and args.objects_suffix != "":
+        add_suffix_to_objects(payload, api_type, args.objects_suffix)
+
+    # for objects that had collisions, use new name in the imported package
+    for field in ["members", "source", "destination"]:
+        if field in payload:
+            for i, member in enumerate(payload[field]):
+                if member in name_collision_map:
+                    payload[field][i] = name_collision_map[member]
+
+    if "tags" in payload:
+        handle_import_tags(payload, api_type, client)
+
+    if args is not None and args.tag_objects_on_import != "":
+        add_tag_to_object_payload(args.tag_objects_on_import, payload, api_type, client)
+
+    if is_rule_type:
+        global should_create_imported_nat_top_section
+        global should_create_imported_nat_bottom_section
+        global imported_nat_top_section_uid
+
+        if "nat-rule" in api_type:
+            # For NAT rules, the 'package' parameter is the name of the policy package!!!
+            if package is None:
+                debug_log("Internal error: package name is unknown", True, True)
+            payload["package"] = package
+            # --- NAT rules specific logic ---
+            # Importing only rules, without sections.
+            # Rules marked as "__before_auto_rules = TRUE" will be imported at the TOP of the rulebase, inside a new section "IMPORTED UPPER RULES".
+            # There is an additional new section "Original Upper Rules" at the bottom of "IMPORTED UPPER RULES".
+            # Rules marked as "__before_auto_rules = FALSE" will be imported at the BOTTOM of the rulebase, inside a new section "IMPORTED LOWER RULES".
+            # There will be no rule merges!!!
+            before_auto_rules = payload["__before_auto_rules"]
+            payload.pop("__before_auto_rules", None)
+            if "true" in before_auto_rules:
+                if should_create_imported_nat_top_section:
+                    should_create_imported_nat_top_section = False
+                    nat_section_payload = {}
+                    nat_section_payload["package"] = package
+                    nat_section_payload["position"] = "top"
+                    # --> we add the footer section first!!!
+                    nat_section_payload["name"] = "Original Upper Rules"
+                    client.api_call("add-nat-section", nat_section_payload)
+                    # <--
+                    nat_section_payload["name"] = "IMPORTED UPPER RULES"
+                    nat_section_reply = client.api_call("add-nat-section", nat_section_payload)
+                    if nat_section_reply.success:
+                        imported_nat_top_section_uid = nat_section_reply.data["uid"]
+                if imported_nat_top_section_uid is None:
+                    payload["position"] = "bottom"
+                else:
+                    sub_payload = {}
+                    sub_payload["bottom"] = imported_nat_top_section_uid
+                    payload["position"] = sub_payload
+            else:
+                if should_create_imported_nat_bottom_section:
+                    should_create_imported_nat_bottom_section = False
+                    nat_section_payload = {}
+                    nat_section_payload["package"] = package
+                    nat_section_payload["position"] = "bottom"
+                    nat_section_payload["name"] = "IMPORTED LOWER RULES"
+                    client.api_call("add-nat-section", nat_section_payload)
+                payload["position"] = "bottom"
+        else:
+            if "position" in payload:
+                if "rule" in api_type:
+                    if payload["action"] == "Drop":
+                        if "action-settings" in payload:
+                            payload.pop("action-settings")
+                        if "user-check" in payload:
+                            if "frequency" in payload["user-check"]:
+                                payload["user-check"].pop("frequency")
+                            if "custom-frequency" in payload["user-check"]:
+                                payload["user-check"].pop("custom-frequency")
+                            if "confirm" in payload["user-check"]:
+                                payload["user-check"].pop("confirm")
+
+            if generic_type:
+                payload["create"] = generic_type
+            if "layer" in api_type:
+                check_duplicate_layer(payload, changed_layer_names, api_type, client)
+                if compare_versions(client.api_version, "1.1") != -1 and "https" not in api_type:
+                    payload["add-default-rule"] = "false"
+                if layer is None:
+                    if "access-layer" in api_type:
+                        # ---> This code segment distinguishes between an inline layer and an ordered layer during import
+                        is_ordered_access_control_layer = payload["__ordered_access_control_layer"]
+                        payload.pop("__ordered_access_control_layer", None)
+                        if "true" in is_ordered_access_control_layer:
+                            layers_to_attach["access"].append(payload["name"])  # ordered access layer
+                        # <--- end of code segment
+                    elif "threat-layer" in api_type:
+                        layers_to_attach["threat"].append(payload["name"])
+                    elif "https-layer" in api_type:
+                        layers_to_attach["https"].append(payload["name"])
+            elif "rule" in api_type or "section" in api_type or \
+                    (api_type == "threat-exception" and "exception-group-name" not in payload):
+                payload["layer"] = layer
+                if args is not None and args.objects_suffix != "":
+                    payload["layer"] += args.objects_suffix
+                if client.api_version != "1" and api_type == "access-rule" and "track-alert" in payload:
+                    payload["track"] = {}
+                    payload["track"]["alert"] = payload["track-alert"]
+                    payload.pop("track-alert", None)
+            elif api_type == "exception-group" and "applied-threat-rules" in payload:
+                for applied_rule in payload["applied-threat-rules"]:
+                    if applied_rule["layer"] in changed_layer_names.keys():
+                        applied_rule["layer"] = changed_layer_names[applied_rule["layer"]]
+        if "https-rule" in api_type:
+            if "blade" in payload and len(payload["blade"]) > 0:
+                if len(payload["blade"]) == 1 and payload["blade"][0] == "All":
+                    del payload["blade"]
+                else:
+                    exported_blades = payload["blade"]
+                    blades_to_import = []
+                    for blade in exported_blades:
+                        if blade in https_blades_names_map:
+                            blades_to_import.append(https_blades_names_map[blade])
+                        else:
+                            blades_to_import.append(blade)
+                    payload["blade"] = blades_to_import
+
+
+def add_batch_objects(api_type, command, client, args, payload):
+    api_reply = add_batch_operation(api_type, command, client, args, payload)
+    succeeded = False
+    if api_reply.success:
+        debug_log("Managed to import API object from type " + api_type +
+                  " by " + command + " API call.\nNow trying to publish.", True)
+        api_reply = handle_publish(client, api_type)
+        if api_reply.success:
+            succeeded = True
+    else:
+        err_msg = ""
+        if 'tasks' in api_reply.data and isinstance(api_reply.data['tasks'], list):
+            if len(api_reply.data['tasks']) > 0 and 'progress-description' in api_reply.data['tasks'][0]:
+                err_msg = api_reply.data['tasks'][0]['progress-description']
+        else:
+            try:
+                err_msg = api_reply.error_message
+            except AttributeError:
+                pass
+        debug_log("Failed to import API object from type " + api_type + " by " + command + " API call.\n"
+                  + err_msg +
+                  "\nNow trying to discard.", True, True)
+        handle_discard(client)
+
+    if not succeeded:
+        debug_log("Failed to import API object from type " + api_type +
+                  " by " + command + " API call.\nFalling back to add objects one by one.", True, True)
+    return succeeded
+
+
+def add_batch_operation(api_type, command, client, args, payload):
+    api_reply = client.api_call(command, payload)
+    return api_reply
+
+
+def handle_publish(client, api_type):
+    publish_reply = client.api_call("publish", wait_for_task=True)
+    if not publish_reply.success:
+        plural = singular_to_plural_dictionary[client.api_version][api_type].replace('_', ' ') \
+            if api_type in singular_to_plural_dictionary[client.api_version] \
+            else "generic objects of type " + api_type
+        try:
+            debug_log("Failed to publish import of " + plural.capitalize() +
+                      " from said file were not imported!. Message: " + str(publish_reply.error_message),
+                      True, True)
+        except UnicodeEncodeError:
+            try:
+                debug_log("UnicodeEncodeError: " + str(publish_reply.error_message), True, True)
+            except:
+                debug_log("UnicodeEncodeError: .encode('utf-8') FAILED", True, True)
+
+        handle_discard(client)
+    else:
+        debug_log("Managed to publish import of API objects from type " + api_type, True)
+    return publish_reply
+
+
+def handle_discard(client):
+    discard_reply = client.api_call("discard")
+    if not discard_reply.success:
+        debug_log("Failed to discard changes of unsuccessful publish! Terminating. Error: " +
+                  discard_reply.error_message,
+                  True, True)
+        exit(1)
+
+
+def adjust_position_decrement(position, error_message):
+    indices_of_brackets = [i for i, letter in enumerate(error_message) if letter == '[' or letter == ']']
+    valid_range = error_message[indices_of_brackets[4]:indices_of_brackets[5] + 1]
+    _, _, final_position_with_bracket = valid_range.partition("-")
+    final_position = final_position_with_bracket[:-1]
+    return position - int(final_position)
+
+
+def check_duplicate_layer(payload, changed_layer_names, api_type, client):
+    layer_name = payload["name"]
+    new_layer_name = payload["name"]
+
+    i = 0
+    while True:
+        show_layer = client.api_call("show-" + api_type, payload={"name": new_layer_name})
+
+        if "code" in show_layer.data and "not_found" in show_layer.data["code"]:
+            if layer_name != new_layer_name:
+                debug_log("A layer named \"%s\" already exists. Name was changed to \"%s\""
+                          % (layer_name, new_layer_name))
+                changed_layer_names[layer_name] = new_layer_name
+                payload["name"] = new_layer_name
+            break
+
+        new_layer_name = "IMPORTED LAYER" + (" " if i == 0 else " %s " % i) + layer_name
+        i += 1
+
+
+def compare_general_object_files(file_a, file_b):
+    api_type_a = "-".join(file_a.name.split("_")[4].split("-")[1:])
+    api_type_b = "-".join(file_b.name.split("_")[4].split("-")[1:])
+    priority_a = import_priority[api_type_a] if api_type_a in import_priority else 0
+    priority_b = import_priority[api_type_b] if api_type_b in import_priority else 0
+    if priority_b > priority_a:
+        return -1
+    elif priority_a > priority_b:
+        return 1
+    return 0
+
+def add_suffix_to_objects(payload, api_type, objects_suffix):
+    global changed_object_names_map
+    ignore_types = ["updatable-object"]
+
+    if api_type in ignore_types:
+        return
+
+    fields_to_change = ["name", "source", "destination", "service", "members", "inline-layer", "networks", "host",
+                        "protected-scope", "protection-or-site", "action", "site-category", "exception-group-name", "rule-name", "applied-threat-rules"]
+    if api_type == "threat-exception" and "exception-group-name" in payload and "name" not in payload:
+        payload.update({"name": ""})
+    for field in fields_to_change:
+        if field in payload:
+            if field == "name":
+                oldName = payload[field]
+                newName = oldName + objects_suffix
+                payload[field] = newName
+                changed_object_names_map[oldName] = newName
+            elif field in ["source", "destination", "service", "members", "protected-scope", "protection-or-site", "site-category"]:
+                for i in range(len(payload[field])):
+                    if payload[field][i] in changed_object_names_map and payload[field][i] != "IPS":
+                        payload[field][i] = changed_object_names_map[payload[field][i]]
+            elif field in ["inline-layer", "host", "exception-group-name", "rule-name", "action"]:
+                if payload[field] in changed_object_names_map:
+                    payload[field] = changed_object_names_map[payload[field]]
+            elif field == "networks":
+                for i in range(len(payload[field])):
+                    if payload[field][i]["name"] in changed_object_names_map:
+                        payload[field][i]["name"] = changed_object_names_map[payload[field][i]["name"]]
+            elif field == "applied-threat-rules":
+                for i in range(len(payload[field])):
+                    if payload[field][i]["layer"] in changed_object_names_map:
+                        payload[field][i]["layer"] = changed_object_names_map[payload[field][i]["layer"]]

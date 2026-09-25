@@ -1,0 +1,128 @@
+{
+  "date": "2026-09-25",
+  "release": "R82.10",
+  "apiVersion": "2.1",
+  "automatedTests": 234,
+  "policyInstalled": false,
+  "runs": [
+    {
+      "name": "Gateway",
+      "previewMs": 8831,
+      "stageAndReadbackMs": 17180,
+      "objects": {
+        "create": 2,
+        "reuse": 21,
+        "conflict": 0,
+        "blocked": 0
+      },
+      "rules": 6,
+      "stagedReadback": "passed",
+      "cleanup": "discarded",
+      "mutationSubmissions": 23,
+      "commands": {
+        "add-network": 1,
+        "add-simple-gateway": 1,
+        "set-simple-gateway": 1,
+        "add-access-layer": 1,
+        "add-threat-layer": 2,
+        "add-https-layer": 2,
+        "add-package": 1,
+        "set-package": 4,
+        "set-threat-rule": 1,
+        "delete-access-layer": 1,
+        "add-access-rule": 3,
+        "add-threat-rule": 1,
+        "add-https-rule": 2,
+        "delete-https-rule": 2
+      }
+    },
+    {
+      "name": "Inline",
+      "previewMs": 7326,
+      "stageAndReadbackMs": 8203,
+      "objects": {
+        "create": 0,
+        "reuse": 6,
+        "conflict": 0,
+        "blocked": 0
+      },
+      "rules": 2,
+      "stagedReadback": "passed",
+      "cleanup": "discarded",
+      "mutationSubmissions": 10,
+      "commands": {
+        "add-access-layer": 2,
+        "add-package": 1,
+        "set-package": 2,
+        "delete-access-layer": 1,
+        "add-access-section": 2,
+        "add-access-rule": 2
+      }
+    },
+    {
+      "name": "Cluster",
+      "previewMs": 5814,
+      "stageAndReadbackMs": 13541,
+      "objects": {
+        "create": 1,
+        "reuse": 5,
+        "conflict": 0,
+        "blocked": 0
+      },
+      "rules": 1,
+      "stagedReadback": "passed",
+      "cleanup": "discarded",
+      "mutationSubmissions": 9,
+      "commands": {
+        "add-simple-cluster": 1,
+        "set-simple-cluster": 1,
+        "add-access-layer": 1,
+        "add-package": 1,
+        "set-package": 2,
+        "delete-access-layer": 1,
+        "add-access-section": 1,
+        "add-access-rule": 1
+      }
+    },
+    {
+      "name": "Batch",
+      "previewMs": 16197,
+      "stageAndReadbackMs": 43822,
+      "objects": {
+        "create": 200,
+        "reuse": 16,
+        "conflict": 0,
+        "blocked": 0
+      },
+      "rules": 105,
+      "stagedReadback": "passed",
+      "cleanup": "discarded",
+      "mutationSubmissions": 53,
+      "commands": {
+        "add-objects-batch": 4,
+        "add-service-group": 3,
+        "add-group": 6,
+        "add-group-with-exclusion": 1,
+        "add-access-layer": 1,
+        "add-threat-layer": 2,
+        "add-https-layer": 2,
+        "add-package": 1,
+        "set-package": 4,
+        "set-threat-rule": 1,
+        "delete-access-layer": 1,
+        "add-access-section": 10,
+        "add-rules-batch": 10,
+        "add-threat-rule": 1,
+        "add-https-rule": 2,
+        "delete-https-rule": 2,
+        "add-nat-rule": 2
+      }
+    }
+  ],
+  "batchBaseline": {
+    "previewMs": 43140,
+    "stageAndReadbackMs": 78686
+  },
+  "benchmarkBoundary": "Same native fixture and unchanged published destination; not a matched Python performance benchmark.",
+  "unresolvedMigrations": 0
+}

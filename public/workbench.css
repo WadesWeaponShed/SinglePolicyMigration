@@ -1,0 +1,57 @@
+:root { --accent: #ca004c; --accent-dark: #a90040; --muted: #526278; --radius: 6px; }
+.catalog-update-actions { align-self: end; align-items: center; }
+#catalogUpdate { min-height: 44px; padding: 10px 14px; font-size: 13px; line-height: 22px; background: #fff0f5; color: #a50040; border-color: #f4c1d3; }
+#catalogUpdate:hover:not(:disabled) { background: #ffe9f1; border-color: var(--accent); }
+#catalogUpdate:disabled { opacity: .6; cursor: wait; }
+.catalog-update-status { margin: 0; padding: 10px 12px; border-left: 3px solid var(--accent); background: #fff0f5; color: #931342; font-size: 13px; }
+.catalog-update-status[data-state=success] { border-color: #18794e; background: #effaf4; color: #17633b; }
+.catalog-update-status[data-state=error] { border-color: #b42335; background: #fff1f1; color: #8f1f1f; }
+.login-credit { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--line); }
+.creator-link { display: inline-flex; align-items: center; gap: 16px; text-decoration: none; max-width: 100%; min-height: 56px; }
+.creator-link img { border-radius: 50%; object-fit: cover; flex: none; }
+.creator-caption { display: block; color: var(--muted); font-size: 13px; margin-bottom: 3px; }
+.creator-name { color: #075bc5; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.app { width: min(1440px, calc(100% - 40px)); padding: 24px 0; }
+.login-panel { max-width: 1080px; margin: 12px auto; padding: 40px; gap: 48px; }
+.login-panel .title-stack span:first-child { font-size: 38px; line-height: 1.15; }
+.login-panel .title-stack span:last-child { font-size: 25px; line-height: 1.3; }
+.login-panel .lede { font-size: 16px; line-height: 1.65; }
+label { font-size: 13px; font-weight: 600; }
+button { min-height: 44px; font-weight: 600; white-space: nowrap; }
+input:not([type=checkbox]):not([type=radio]), select { min-height: 44px; min-width: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.topbar { padding: 16px 22px; }
+.title-stack.compact span:first-child { font-size: 23px; }
+.title-stack.compact span:last-child { font-size: 13px; }
+.topbar .eyebrow { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--muted); }
+.topbar-description { font-size: 12px; }
+.workbench { display: grid; grid-template-columns: 244px minmax(0, 1fr); background: white; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.workbench-nav { padding: 24px 14px; background: #f4f6fa; border-right: 1px solid var(--line); }
+.workbench-nav > h2 { font-size: 15px; margin: 0 10px 22px; }
+.workbench-nav > button { display: block; width: 100%; text-align: left; background: transparent; border-color: transparent; margin-bottom: 8px; font-size: 13px; white-space: normal; }
+.workbench-nav > button[aria-pressed=true] { background: #ffe9f1; color: #a50040; border-color: #f4c1d3; }
+.workbench-content { min-width: 0; }
+.workbench-content > .panel { padding: 24px 28px; border: 0; border-radius: 0; }
+.workbench-content > .output-panel { border-top: 1px solid var(--line); }
+.workbench-content h2 { font-size: 23px; }
+.workbench-content .table-head p { font-size: 13px; }
+.workbench-nav .panel { background: transparent; border: 0; padding: 24px 10px; }
+.workbench-nav .panel h2 { font-size: 13px; }
+.workbench-nav .table-head p { font-size: 12px; }
+.contexts { display: grid; grid-template-columns: 1fr; gap: 6px; }
+.contexts span { min-height: 0; padding: 8px; font-size: 12px; font-weight: 500; }
+.badge { border-radius: 4px; font-weight: 600; }
+.script-result-card { background: white; }
+.script-output { white-space: pre; overflow-wrap: normal; }
+.result-output, .script-result-card, .gateway-executions, .gateway-execution { min-width: 0; }
+@media (max-width: 850px) {
+  .workbench { grid-template-columns: 1fr; }
+  .workbench-nav { border-right: 0; border-bottom: 1px solid var(--line); }
+  .workbench-nav > button { display: inline-block; width: auto; }
+  .workbench-nav .panel { padding: 12px 0 0; }
+  .workbench-nav .panel .table-head { margin-bottom: 8px; }
+  .workbench-nav .panel .table-head p { display: none; }
+  .contexts { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .login-panel { grid-template-columns: 1fr; padding: 24px; gap: 24px; }
+  .workbench-content > .panel { padding: 20px; }
+}
