@@ -114,6 +114,7 @@ test('native live-source scan discovers TP/HTTPS dependencies and exceptions bef
   if(cmd==='show-package'&&id==='source')return pkg;
   if(cmd==='show-objects')return {objects:[any,profile],total:2};
   if(cmd==='show-object')return {object:[any,profile].find(o=>o.uid===body.uid)};
+  if(cmd==='show-threat-profile')return profile;
   if(id==='source') {
    const layer=expected.layers.find(l=>l.uid===body.uid);
    if(cmd.endsWith('-layer')){const {kind,slot,ordered,targetName,items,exceptionSets,...config}=layer;return config;}

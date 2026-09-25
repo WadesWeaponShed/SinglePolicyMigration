@@ -183,3 +183,44 @@ test('named threat exception actions verify against builtin identities without a
  assert.throws(()=>verify('detect-id',[{...detect,domain:{'domain-type':'domain'}}]),/action/);
  assert.throws(()=>verify('unknown-id',[]),/action/);
 });
+
+test('profile readback permits only known destination-generated sections absent from the source and API',()=>{
+ const source={uid:'source',type:'threat-profile',name:'Custom','anti-virus':true};
+ const expected={name:'Custom','anti-virus':true};
+ const actual={...source,uid:'created','anti-virus-settings':{protocols:{'web-protocol':true}},'mail-general':{'scan-emails':true}};
+ const context={uid:'created',type:'threat-profile',sourceDefinition:source,objectSchema:{'threat-profile':['name','anti-virus']}};
+ assert.doesNotThrow(()=>verifyCreatedDefinition(expected,actual,context));
+ assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'anti-virus':false},context),/anti-virus/);
+ assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'unknown-security-settings':{}},context),/unknown-security-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,actual,{...context,sourceDefinition:{...source,'anti-virus-settings':{}}}),/anti-virus-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,actual,{...context,sourceDefinition:undefined}),/anti-virus-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,actual,{...context,objectSchema:{'threat-profile':['name','anti-virus','anti-virus-settings']}}),/anti-virus-settings/);
+});
+
+test('v2.1 profile readback recognizes only the absent-source default DNS trap pair',()=>{
+ const dns={'dga-detection':'true','dns-domain-tunneling':'true','dns-over-https':'true','nxns-attack-detection':'true'};
+ const expected={name:'Custom','advanced-dns-settings':dns};
+ const actual={...expected,uid:'created',type:'threat-profile','advanced-dns-settings':{...dns,enabled:true,'activate-dns-trap':true,'trap-ipv4-address':''}};
+ const context={uid:'created',type:'threat-profile',apiVersion:'v2.1',sourceDefinition:expected,objectSchema:{'threat-profile':['name','advanced-dns-settings']}};
+ assert.doesNotThrow(()=>verifyCreatedDefinition(expected,actual,context));
+ for(const patch of [{'dga-detection':'false'},{'activate-dns-trap':false},{'trap-ipv4-address':'192.0.2.1'},{'unknown-setting':true}])assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'advanced-dns-settings':{...actual['advanced-dns-settings'],...patch}},context),/advanced-dns-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,actual,{...context,apiVersion:'v2.2'}),/advanced-dns-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,actual,{...context,sourceDefinition:{...expected,'advanced-dns-settings':{...dns,'activate-dns-trap':false}}}),/advanced-dns-settings/);
+ assert.equal(actual['advanced-dns-settings']['activate-dns-trap'],true);
+});
+
+test('layer readback accepts no additional permission profiles but rejects real assignments',()=>{
+ const expected={name:'Layer'},actual={uid:'layer',type:'access-layer',name:'Layer','additional-permission-profiles':[]};
+ const context={uid:'layer',type:'access-layer',policySchema:{'access-layer':['name']}};
+ assert.doesNotThrow(()=>verifyCreatedDefinition(expected,actual,context));
+ assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'additional-permission-profiles':['permission']},context),/additional-permission-profiles/);
+ assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'additional-permission-profiles':null},context),/additional-permission-profiles/);
+});
+
+test('threat layer readback accepts absent-schema nonshared and empty permissions only',()=>{
+ const expected={name:'IPS'},actual={uid:'layer',type:'threat-layer',name:'IPS',shared:false,'permissions-profiles':[]};
+ const context={uid:'layer',type:'threat-layer',policySchema:{'threat-layer':['name']}};
+ assert.doesNotThrow(()=>verifyCreatedDefinition(expected,actual,context));
+ assert.throws(()=>verifyCreatedDefinition(expected,{...actual,shared:true},context),/shared/);
+ assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'permissions-profiles':['admin']},context),/permissions-profiles/);
+});

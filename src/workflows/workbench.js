@@ -55,7 +55,7 @@ export class Workbench {
       }
       const session=await this.sessions.login({...credentials,mdsMode:false,domain:domain?.uid||'',readOnly:role==='Source',...(role==='Destination'?{sessionName:'Native migration destination'}:{})});opened.push(session.sessionId);
       if(!domain) {
-        const state=await this.sessions.command(session.sessionId,'show-session',{'details-level':'full'});
+        const state=await this.sessions.command(session.sessionId,'show-session',{});
         if(!state.domain?.uid||!state.domain?.name)throw new Error(`${role} management context could not be identified.`);
         domain=state.domain;
         if(['mds','global domain'].includes(domain['domain-type']))throw new Error(`${role} is not a standalone policy domain. Specify its MDS domain.`);
@@ -147,10 +147,13 @@ export class Workbench {
     if(!plan || plan.id!==body.planId || plan.state!=='preview' || c.job) throw new Error('Rename requires the current, unstaged preview. Rescan first.');
     if(Date.parse(plan.expiresAt)<Date.now()) throw new Error('Preview expired. Rescan before resolving conflicts.');
     const row=plan.objects.find(o=>o.uid===body.objectUid);
-    if(!row?.renameAllowed) throw new Error('This conflict cannot be resolved by renaming.');
+    if(!row?.renameAllowed&&!row?.profileResolutionAllowed) throw new Error('This conflict cannot be resolved by renaming.');
     const renames={...plan.renames};
     if(body.reset===true) delete renames[row.uid];
-    else renames[row.uid]=body.newName;
+    else if(row.profileResolutionAllowed) {
+      if(!['reuse-profile','copy-profile'].includes(body.profileAction))throw new Error('Choose a profile resolution.');
+      renames[row.uid]=body.profileAction==='reuse-profile'?{action:body.profileAction,targetUid:row.target?.uid||row.profileTargetUid}:{action:body.profileAction,name:body.newName};
+    }else renames[row.uid]=body.newName;
     // Rebuild from the immutable scanned definitions, not client-supplied objects.
     const {id:oldId,createdAt,expiresAt,digest,counts,blockers,ready,state,ruleCount,...snapshot}=plan;
     const engine=c.demo?null:await nativeEngine();

@@ -150,6 +150,16 @@ export async function bulkDestinationDefinitions(sessions,targetId,candidates,on
   return result;
 }
 
+export async function readComparisonObject(sessions,id,uid) {
+  const reply=await sessions.command(id,'show-object',{uid,'details-level':'full'});
+  const summary=reply.object||reply;
+  if(summary.type!=='threat-profile')return reply;
+  const detailed=await sessions.command(id,'show-threat-profile',{uid,'details-level':'full'});
+  const profile=detailed.object||detailed;
+  if(profile.uid!==uid||profile.type!==summary.type||profile.name!==summary.name||profile.domain?.uid!==summary.domain?.uid)throw new Error('Threat profile identity changed during the scan. Scan again.');
+  return {object:profile};
+}
+
 export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootId,targetRootId=rootId,sourceDomain,targetDomain,packageUid,targetName,renames={},options={},apiVersion,engineRevision,onProgress=()=>{}}) {
   if(sourceRootId===undefined||targetRootId===undefined)throw new Error('Explicit management contexts are required.');
   options=normalizeMigrationOptions(options);
@@ -295,7 +305,7 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
       const found=reply.object||reply;
       if(!builtin(found))throw new Error(`Archive dependency ${uid} is not a verified built-in; supply its real source definition.`);
       result={object:found};
-    } else result=await sessions.command(sourceId,'show-object',{uid,'details-level':'full'});
+    } else result=sourceDomain.archive?await sessions.command(sourceId,'show-object',{uid,'details-level':'full'}):await readComparisonObject(sessions,sourceId,uid);
     return result;
   },(uid,result)=>{
     if(result===null)return;
@@ -329,7 +339,7 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
   await readDependencyFrontiers(pending,async uid=>{
     if(bulkDefinitions.has(uid))return {object:bulkDefinitions.get(uid)};
     let result;
-    try {result=await sessions.command(targetId,'show-object',{uid,'details-level':'full'});}
+    try {result=await readComparisonObject(sessions,targetId,uid);}
     catch(error){error.message=`Cannot read destination definition ${dm.get(uid)?.name||uid} (show-object): ${error.message}`;throw error;}
     return result;
   },(uid,result)=>{
@@ -471,8 +481,10 @@ function preparePlanObjects(data) {
     if(tag.status==='conflict')tag.reason='Import tag name is already used by a different object; choose another tag.';
     tag.renameAllowed=false;rows=[tag,...rows];
   }
-  const checks=(data.checks||[]).filter(check=>!check.name.startsWith('Profile tagging'));
+  const checks=(data.checks||[]).filter(check=>!check.name.startsWith('Profile tagging')&&!check.name.startsWith('Profile resolution · ')&&check.name!=='Destination profile defaults');
+  for(const row of rows.filter(o=>o.profileResolution))checks.push({name:`Profile resolution · ${row.name}`,ok:true,severity:'notice',detail:row.reason});
   const profiles=rows.filter(o=>o.status==='create'&&o.type==='threat-profile');
+  if(profiles.some(row=>profileResponseSections.some(key=>!Object.hasOwn(row.source,key)&&!writableFields('threat-profile',data.objectSchema,fields).includes(key))))checks.push({name:'Destination profile defaults',ok:true,severity:'notice',detail:'New Threat Prevention profiles may receive destination-generated blade and mail settings that are absent from the source and not writable through the selected API. For API v2.1, this also permits the destination-only DNS-trap response pair activate-dns-trap=true and an empty trap-ipv4-address when both are absent from the source. Configured trap addresses and all requested settings are verified. Source settings without a writable representation remain blocked.'});
   if(data.apiVersion==='v2.1'&&profiles.length) {
     const tagged=profiles.filter(o=>o.source.tags?.length);
     if(tagged.length)checks.push({name:'Profile tagging preservation',ok:false,detail:'This API release ignores Threat Prevention profile tags. Existing source profile tags cannot be preserved: '+tagged.map(o=>o.name).join(', ')});
@@ -663,11 +675,35 @@ function layerPayload(layer, mapping = new Map(), schema) {
 
 // Compare full writable definitions, including server-added writable fields. Unknown
 // defaults therefore fail closed instead of silently changing migration semantics.
-export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema,policySchema,expectedName}) {
+const profileResponseSections=['zero-phishing-settings','anti-virus-settings','anti-bot-settings','mail-exceptions','threat-emulation-settings','threat-extraction-settings','mail-general','mail-mime-nesting'];
+export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema,policySchema,expectedName,sourceDefinition,apiVersion}) {
   const label=type==='access-layer'?'layer':'object';
   if(!actual || actual.uid!==uid || actual.type!==type) throw new Error(`Staged ${label} identity verification failed: ${expected.name}.`);
   if(expectedName&&actual.name!==expectedName)throw new Error(`Staged object name differs: expected ${expectedName}, received ${actual.name}.`);
   const writable=type.endsWith('-layer')?policyLayerFields({kind:type.split('-')[0]},layerFields,policySchema):writableFields(type,objectSchema,fields);
+  if(type.endsWith('-layer')&&!writable.includes('additional-permission-profiles')&&!Object.hasOwn(expected,'additional-permission-profiles')&&Array.isArray(actual['additional-permission-profiles'])&&actual['additional-permission-profiles'].length===0) {
+    actual={...actual};delete actual['additional-permission-profiles'];
+  }
+  if(type==='threat-layer')for(const key of ['shared','permissions-profiles']) {
+    const empty=key==='shared'?actual[key]===false:Array.isArray(actual[key])&&actual[key].length===0;
+    if(empty&&!writable.includes(key)&&!Object.hasOwn(expected,key)){actual={...actual};delete actual[key];}
+  }
+  if(type==='threat-profile'&&sourceDefinition) {
+    actual={...actual};
+    // These response sections are generated by newer destinations. Exempt only
+    // known non-writable sections absent from both the source and create request.
+    // A source value, newly writable field, or unknown section must still verify.
+    for(const key of profileResponseSections)if(!Object.hasOwn(sourceDefinition,key)&&!Object.hasOwn(expected,key)&&!writable.includes(key))delete actual[key];
+    const dns=actual['advanced-dns-settings'];
+    const trapKeys=['activate-dns-trap','trap-ipv4-address'];
+    // API v2.1 has no writable DNS-trap fields. A newer destination can emit
+    // this default pair even when neither field exists in the source. Never
+    // hide a source value, explicit request, or configured trap address.
+    if(apiVersion==='v2.1'&&dns?.['activate-dns-trap']===true&&dns['trap-ipv4-address']===''&&trapKeys.every(key=>!Object.hasOwn(sourceDefinition['advanced-dns-settings']||{},key)&&!Object.hasOwn(expected['advanced-dns-settings']||{},key))) {
+      actual['advanced-dns-settings']={...dns};
+      for(const key of trapKeys)delete actual['advanced-dns-settings'][key];
+    }
+  }
   const unknown=type.endsWith('-layer')?Object.keys(actual).filter(key=>!writable.includes(key) && !metadata.has(key) && !(type==='threat-layer'&&key==='ips-layer') && !(type==='access-layer'&&key==='parent-layer')):[];
   if(unknown.length) throw new Error(`Staged ${label} verification failed: ${expected.name}, unmapped settings ${unknown.join(', ')}.`);
   if(!type.endsWith('-layer')&&unsupported(actual,objectSchema))throw new Error(`Staged object verification failed: ${expectedName||expected.name}, unmapped settings or unsupported definition: ${unsupported(actual,objectSchema)}`);
@@ -683,7 +719,7 @@ export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema
   };
   for(const key of new Set([...Object.keys(expected),...Object.keys(received)])) {
     if(expected[key]===undefined || received[key]===undefined || hash(canonical(expected[key],key))!==hash(canonical(received[key],key))) {
-      const detail=['nat-settings','tags','logs-settings','firewall-settings'].includes(key)?` Expected ${JSON.stringify(expected[key])}; received ${JSON.stringify(received[key])}.`:'';
+      const detail=['nat-settings','tags','logs-settings','firewall-settings','advanced-dns-settings'].includes(key)?` Expected ${JSON.stringify(expected[key])}; received ${JSON.stringify(received[key])}.`:'';
       throw new Error(`Staged ${label} verification failed: ${expected.name}, ${key}.${detail}`);
     }
   }
@@ -778,7 +814,7 @@ export async function stagePlan({sessions,targetId,plan,onProgress=()=>{}}) {
         if(configured['task-id'])await runNativeBatch({sessions,targetId,command:`set-${o.type}`,initialResponse:configured,allowedWarnings:plan.objects.flatMap(row=>expectedCopyWarnings(row,plan)),onProgress});
       }
       mapping.set(o.uid,created.uid);
-      createdDefinitions.push({uid:created.uid,type:o.type,expected:body,expectedName:o.importName||o.name,objectSchema:plan.objectSchema,inheritedSource:['simple-gateway','simple-cluster'].includes(o.type)?o.source:undefined});
+      createdDefinitions.push({uid:created.uid,type:o.type,expected:body,expectedName:o.importName||o.name,objectSchema:plan.objectSchema,sourceDefinition:o.source,apiVersion:plan.apiVersion,inheritedSource:['simple-gateway','simple-cluster'].includes(o.type)?o.source:undefined});
     }
     for(const l of plan.layers) {
       const body={...layerPayload(l,mapping,plan.policySchema),name:l.targetName};

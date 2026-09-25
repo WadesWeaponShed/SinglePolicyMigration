@@ -257,9 +257,23 @@ export function compareObjects(source, destination, schema) {
     const equal=d=>d.type===o.type&&signature(d)===sig;
     if(builtin(o)) {
       const exact=destination.find(d=>builtin(d)&&d.uid===(o['archive-reference-uid']||o.uid)&&d.type===o.type);
-      if(exact)return equal(exact)?{...row,status:'reuse',target:exact,reason:'Verified built-in UID, type and policy-relevant definition.'}:{...row,status:'blocked',target:exact,reason:'The built-in UID has a different policy-relevant definition in the destination.'};
+      if(exact) {
+        if(equal(exact))return {...row,status:'reuse',target:exact,reason:'Verified built-in UID, type and policy-relevant definition.'};
+        const differences=[];
+        const walk=(a,b,path='')=>{
+          if(a===b||(a!==undefined&&b!==undefined&&hash(a)===hash(b)))return;
+          if(a&&b&&typeof a==='object'&&typeof b==='object'&&!Array.isArray(a)&&!Array.isArray(b)) {
+            for(const key of new Set([...Object.keys(a),...Object.keys(b)]))walk(a[key],b[key],path?`${path}.${key}`:key);
+          }else differences.push(`${path}${a===undefined?' (not reported by source)':b===undefined?' (not reported by destination)':''}`);
+        };
+        try{walk(semantic(o,sm,new Set(),schema),semantic(exact,dm,new Set(),schema));}catch{/* Keep comparison failures blocked. */}
+        return {...row,status:o.type==='threat-profile'?'conflict':'blocked',profileResolutionAllowed:o.type==='threat-profile',target:exact,reason:`Built-in settings could not be verified as equivalent.${differences.length?` Differences: ${differences.slice(0,10).join('; ')}${differences.length>10?'; …':''}.`:''} Matching name and UID alone cannot establish equivalent protection settings.`};
+      }
       const matches=same.filter(d=>builtin(d)&&d.type===o.type&&equal(d));
       if(matches.length===1)return {...row,status:'reuse',target:matches[0],reason:'Verified built-in name, type and definition in the destination.'};
+      const profiles=same.filter(d=>builtin(d)&&d.type==='threat-profile');
+      if(o.type==='threat-profile'&&profiles.length===1)return {...row,status:'conflict',target:profiles[0],profileResolutionAllowed:true,reason:'A destination built-in profile has the same name but different settings. Review and explicitly use it, or create a custom profile with a new name.'};
+      if(o.type==='threat-profile'&&!profiles.length)return {...row,status:'conflict',profileResolutionAllowed:true,reason:'No matching destination built-in profile was verified. Create a custom profile with a unique name if the source settings can be preserved.'};
       return {...row,status:same.some(d=>builtin(d)&&d.type===o.type)?'conflict':'blocked',reason:matches.length?'Multiple built-in definitions match; an exact identity could not be verified.':'Built-in object was not verified in the destination.'};
     }
     if(same.length) {
@@ -287,6 +301,8 @@ export function translate(value, mapping) {
 export function resolveObjectRenames(rows, destination, renames = {}, reservedNames = [], schema, options = {}) {
   if (!renames || Array.isArray(renames) || typeof renames !== 'object') throw new Error('Invalid rename choices.');
   const source = rows.map(row => row.source);
+  const profileChoices=Object.fromEntries(Object.entries(renames).filter(([,v])=>v&&typeof v==='object'));
+  renames=Object.fromEntries(Object.entries(renames).filter(([,v])=>!v||typeof v!=='object'));
   const names = new Map();
   if(options.objectSuffix)for(const object of source)if(!builtin(object)&&!['dns-domain','updatable-object'].includes(object.type)&&!certificateTypes.has(object.type)&&object.uid!==options.importTagUid)names.set(object.uid,object.name+options.objectSuffix);
   const original = compareObjects(source.map(o=>names.has(o.uid)?{...o,name:names.get(o.uid)}:o), destination,schema);
@@ -308,7 +324,7 @@ export function resolveObjectRenames(rows, destination, renames = {}, reservedNa
     if (source.some(o => o.uid !== uid && (names.get(o.uid) || o.name).toLowerCase() === name.toLowerCase())) throw new Error(`Another object in this migration uses the name ${name}.`);
   }
   const effective = source.map(o => names.has(o.uid) ? {...o, name:names.get(o.uid)} : o);
-  return compareObjects(effective, destination,schema).map((row, i) => {
+  const resolved=compareObjects(effective, destination,schema).map((row, i) => {
     if (!names.has(row.uid)) return row;
     // A rename must not silently become a reuse of a differently named object.
     const reused = row.status === 'reuse' && row.target.name.toLowerCase()!==names.get(row.uid).toLowerCase();
@@ -318,4 +334,23 @@ export function resolveObjectRenames(rows, destination, renames = {}, reservedNa
       status:reused ? (options.objectSuffix&&!Object.hasOwn(renames,row.uid)?'create':'conflict') : row.status,
       reason:reused&&options.objectSuffix&&!Object.hasOwn(renames,row.uid)?`Create the explicitly requested copy ${names.get(row.uid)}; an equivalent object has a different name.`:row.status==='reuse'&&!reused?`Reuse the verified destination object ${row.target.name}; its definition matches the requested renamed object.`:reused ? 'An equivalent destination object already exists. Renaming cannot resolve this duplicate definition.' : row.status === 'create' ? `Create as ${names.get(row.uid)}. All imported references will use the new object; the existing destination object is unchanged.` : row.reason};
   });
+  for(const [uid,choice] of Object.entries(profileChoices)) {
+    const index=resolved.findIndex(row=>row.uid===uid),row=resolved[index];
+    if(!row||row.type!=='threat-profile'||!builtin(row.source))throw new Error('Profile resolution requires a built-in Threat Prevention profile.');
+    if(choice.action==='reuse-profile') {
+      const target=destination.find(o=>o.uid===choice.targetUid&&o.type==='threat-profile'&&builtin(o)&&o.name===row.source.name);
+      if(!target)throw new Error('The reviewed destination profile is unavailable. Rescan and choose a resolution.');
+      resolved[index]={...row,status:'reuse',target,profileResolutionAllowed:true,profileResolution:choice.action,reason:`Explicitly use destination profile ${target.name}. Its protection settings replace the source profile settings for imported references; the destination profile is not modified.`};
+    }else if(choice.action==='copy-profile') {
+      const name=typeof choice.name==='string'?choice.name.trim():'';
+      if(!name||name.length>100||/[\x00-\x1f\x7f]/.test(name))throw new Error('Enter a profile name of 1–100 characters without control characters.');
+      if([...destination,...effective.filter(o=>o.uid!==uid)].some(o=>o.name.toLowerCase()===name.toLowerCase())||reservedNames.some(n=>n.toLowerCase()===name.toLowerCase())||source.some(o=>o.name.toLowerCase()===name.toLowerCase()))throw new Error('Choose a unique name for the new custom profile.');
+      const reason=unsupported({...row.source,domain:{'domain-type':'domain'}},schema);
+      if(reason)throw new Error(`Cannot preserve the source as a custom profile: ${reason}`);
+      resolved[index]={...row,status:'create',target:row.target,profileTargetUid:row.target?.uid,importName:name,profileResolutionAllowed:true,profileResolution:choice.action,reason:`Create custom profile ${name} from the source settings. Imported references use the new profile; built-in profiles remain unchanged.`};
+    }else throw new Error('Unknown profile resolution.');
+  }
+  const importNames=resolved.filter(o=>o.status==='create').map(o=>(o.importName||o.name).toLowerCase());
+  if(new Set(importNames).size!==importNames.length)throw new Error('Imported object names must be unique.');
+  return resolved;
 }

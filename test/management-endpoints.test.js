@@ -8,7 +8,7 @@ function fixture({failDestination=false}={}) {
  const sessions={login:async payload=>{calls.push({command:'login',payload});if(failDestination&&payload.host.includes('target'))throw new Error('Target unavailable');const sessionId=`session-${sessionsById.size}`;sessionsById.set(sessionId,payload);return {sessionId,baseUrl:payload.host.replace(/\/$/,'')};},logout:async id=>{calls.push({command:'logout',id});return {};},command:async(id,command,body,context)=>{
   calls.push({id,command,body,context});
   if(command==='show-domains')return {objects:[{uid:'domain',name:'CMA'}],total:1};
-  if(command==='show-session')return {uid:'session',changes:0,domain:{uid:'same-standalone-uid',name:'Management','domain-type':'domain'}};
+  if(command==='show-session'){assert.deepEqual(body,{},'Current-session discovery must not send unsupported parameters');return {uid:'session',changes:0,domain:{uid:'same-standalone-uid',name:'Management','domain-type':'domain'}};}
   if(command==='show-packages')return {packages:[],total:0};
   throw new Error(command);
  }};

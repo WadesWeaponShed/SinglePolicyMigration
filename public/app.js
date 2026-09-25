@@ -3,7 +3,7 @@ const $$=s=>[...document.querySelectorAll(s)];
 let connection=null, plan=null, job=null, busy=false, currentView='setup', pollTimer=null;
 const el=(tag,text,className)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;};
 const badge=(text,state)=>el('span',text,`badge ${state}`);
-const labels={create:'Create',reuse:'Reuse',conflict:'Conflict',blocked:'Unsupported'};
+const labels={create:'Create',reuse:'Reuse',conflict:'Conflict',blocked:'Blocked'};
 const activityLabels={'archive/export':['Exporting policy archive','Policy archive exported'],connect:['Connecting to MDS','Management connected'],select:['Opening domain sessions','Domains and policy list loaded'],preview:['Scanning policy','Scan complete'],rename:['Updating preview','Preview updated'],stage:['Staging migration','Staging request completed'],finish:['Updating destination session','Destination session updated'],reconcile:['Checking publish result','Publish status checked'],recover:['Checking recovery','Recovery check complete'],logout:['Disconnecting','Disconnected'],'catalog/coverage':['Checking API coverage','API coverage loaded'],'catalog/update':['Updating API catalogs','API catalogs updated']};
 let activity=null,activityPoll=null,activitySequence=0;
 let policyArchive=null;
@@ -201,7 +201,7 @@ function renderPlan() {
   const checks=[...plan.checks,{name:'Object definitions & name conflicts',ok:plan.counts.conflict+plan.counts.blocked===0,detail:plan.counts.conflict+plan.counts.blocked?`${plan.counts.conflict} conflicts and ${plan.counts.blocked} unsupported objects. Open Object changes for the exact definitions.`:`${plan.counts.create} objects to create; ${plan.counts.reuse} verified matches to reuse.`}];
   $('#checks').replaceChildren(...checks.map(c=>{const row=el('div',undefined,`check-row-result ${['warning','notice'].includes(c.severity)?'warning':c.ok?'pass':'fail'}`);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');const circle=document.createElementNS(svg.namespaceURI,'circle');circle.setAttribute('cx','12');circle.setAttribute('cy','12');circle.setAttribute('r','9');svg.append(circle);const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',['warning','notice'].includes(c.severity)?'M12 7v6m0 3v1':c.ok?'m8 12 3 3 5-6':'m9 9 6 6m0-6-6 6');svg.append(path);const text=el('div');text.append(el('b',c.name),el('p',c.detail));row.append(svg,text,badge(['warning','notice'].includes(c.severity)?(c.severity==='notice'?'Notice':'Review'):c.ok?'Passed':'Blocked',['warning','notice'].includes(c.severity)?'warning':c.ok?'pass':'fail'));return row;}));
   $('#planDescription').textContent=`${plan.package.name} → ${plan.targetName} · ${plan.ruleCount} rules across ${plan.layers.length} policy layers`;
-  $('#changeSummary').replaceChildren(...[['create','To create'],['reuse','To reuse'],['conflict','Conflicts'],['blocked','Unsupported']].map(([k,label])=>{const d=el('div');d.append(el('strong',String(plan.counts[k])),el('span',label));return d;}));
+  $('#changeSummary').replaceChildren(...[['create','To create'],['reuse','To reuse'],['conflict','Conflicts'],['blocked','Blocked']].map(([k,label])=>{const d=el('div');d.append(el('strong',String(plan.counts[k])),el('span',label));return d;}));
   $('#layerSelect').replaceChildren(...plan.layers.flatMap(l=>[option(l.uid,`${l.name} · ${l.kind||'access'}${l.kind==='access'&&!l.ordered?' · Inline':''}`),...(l.exceptionSets||[]).filter(e=>e.items.length).map(e=>option(`exceptions:${l.uid}:${e.ruleUid}`,`${l.name} · Exceptions for ${l.items.find(r=>r.uid===e.ruleUid)?.name||e.ruleUid}`))]),...(plan.nat.length?[option('nat','NAT rulebase')]:[]));
   $('#ruleCount').textContent=`${plan.ruleCount} rules`;
   $('#objectDetail').hidden=true;
@@ -223,7 +223,7 @@ function renderObjects() {
     const tr=el('tr');const name=el('td',o.name);if(o.importName)name.append(el('small',`Import as ${o.importName}`));if(o.target&&o.target.name!==o.name)name.append(el('small',`Maps to ${o.target.name}`));
     const dest=el('td',definition(o.target),'definition');
     const outcome=el('td');outcome.append(badge(labels[o.status],o.status));
-    const detail=el('td'),button=el('button',o.renameAllowed?(o.importName?'Edit rename':'Resolve'):'↗',o.renameAllowed?'resolve-button':'detail-button');button.setAttribute('aria-label',`${o.renameAllowed?'Resolve conflict for':'Compare'} ${o.name}`);button.addEventListener('click',()=>objectDetail(o));detail.append(button);
+    const detail=el('td'),button=el('button',(o.renameAllowed||o.profileResolutionAllowed)?(o.profileResolution?'Edit resolution':o.importName?'Edit rename':'Resolve'):'↗',(o.renameAllowed||o.profileResolutionAllowed)?'resolve-button':'detail-button');button.setAttribute('aria-label',`${(o.renameAllowed||o.profileResolutionAllowed)?'Resolve conflict for':'Compare'} ${o.name}`);button.addEventListener('click',()=>objectDetail(o));detail.append(button);
     tr.append(name,el('td',o.type),el('td',definition(o.source),'definition'),dest,outcome,detail);return tr;
   }));
   if(!rows.length){const row=el('tr'),td=el('td',plan.objects.length?'No objects match these filters.':'Object scan is unavailable until the preflight blockers are resolved.','empty-state');td.colSpan=6;row.append(td);$('#objectsBody').append(row);}
@@ -234,27 +234,31 @@ function objectDetail(o) {
   const compare=el('div',undefined,'definition-compare');
   for(const [title,data] of [['Source definition',o.source],['Destination definition',o.target]]){const side=el('div');side.append(el('h3',title),el('pre',data?JSON.stringify(data,null,2):'No matching object. A new object will be created.'));compare.append(side);}
   panel.replaceChildren(heading,el('p',o.reason),compare);
-  if(o.renameAllowed && plan.state==='preview' && !job) panel.append(renameForm(o));
+  if((o.renameAllowed||o.profileResolutionAllowed) && plan.state==='preview' && !job) panel.append(renameForm(o));
   else if(o.status==='conflict') panel.append(el('p','Renaming resolves name collisions. Ambiguous exact matches still require review before migration.')); heading.tabIndex=-1;heading.focus({preventScroll:true});panel.scrollIntoView({behavior:'instant',block:'nearest'});
 }
 function renameForm(o) {
   const form=el('form',undefined,'rename-form');
   const label=el('label','New name for imported object');
+  const resolution=el('select');
+  if(o.profileResolutionAllowed){resolution.append(new Option('Use destination profile','reuse-profile'),new Option('Create a renamed custom profile','copy-profile'));resolution.options[0].disabled=!o.target&&!o.profileTargetUid;resolution.value=o.profileResolution||(resolution.options[0].disabled?'copy-profile':'reuse-profile');}
   const input=el('input');input.value=o.importName||`${o.name}_MIGRATED`;input.required=true;input.maxLength=100;input.autocomplete='off';label.append(input);
   const help=el('p','Only the incoming object is renamed. Group members and rule references follow the new object. Exact definition matching and name uniqueness checks still apply.','field-help');
+  if(o.profileResolutionAllowed)help.textContent='Using the destination profile accepts its protection settings for imported rules. Creating a custom profile preserves the source settings only if API validation and readback pass. No existing profile is modified.';
   const error=el('p',undefined,'status-message');error.setAttribute('role','alert');
   const actions=el('div',undefined,'bottom-actions'),save=el('button','Apply rename','primary');save.type='submit';actions.append(save);
   const apply=async reset=>{
     if(busy)return;busy=true;save.disabled=true;input.disabled=true;error.textContent='';updateControls();
     try {
-      const result=await api('rename',{planId:plan.id,objectUid:o.uid,newName:input.value,reset});
+      const result=await api('rename',{planId:plan.id,objectUid:o.uid,newName:input.value,reset,...(o.profileResolutionAllowed?{profileAction:resolution.value}:{})});
       plan=result.plan;$('#confirmName').value='';$('#confirmReviewed').checked=false;
       renderPlan();renderObjects();objectDetail(plan.objects.find(row=>row.uid===o.uid));
-      status(reset?'Rename removed. Review the conflict.':'Rename applied to the preview. Review the updated objects and rulebase.');
+      status(o.profileResolutionAllowed?(reset?'Profile resolution removed.':'Profile resolution applied. Review the updated objects and rulebase.'):(reset?'Rename removed. Review the conflict.':'Rename applied to the preview. Review the updated objects and rulebase.'));
     } catch(e){error.textContent=e.message;}
     finally{busy=false;save.disabled=false;input.disabled=false;updateControls();}
   };
-  if(o.importName){const undo=el('button','Undo rename');undo.type='button';undo.addEventListener('click',()=>void apply(true));actions.append(undo);}
+  if(o.importName||o.profileResolution){const undo=el('button',o.profileResolutionAllowed?'Undo resolution':'Undo rename');undo.type='button';undo.addEventListener('click',()=>void apply(true));actions.append(undo);}
+  if(o.profileResolutionAllowed){const choice=el('label','Resolve profile conflict');choice.append(resolution);form.append(choice);const toggle=()=>{label.hidden=resolution.value!=='copy-profile';input.required=!label.hidden;save.textContent=resolution.value==='reuse-profile'?'Accept destination profile':'Create custom profile in preview';};resolution.addEventListener('change',toggle);toggle();}
   form.append(label,help,error,actions);form.addEventListener('submit',e=>{e.preventDefault();void apply(false);});return form;
 }
 async function renameAllConflicts() {
