@@ -3,8 +3,15 @@ const $$=s=>[...document.querySelectorAll(s)];
 let connection=null, plan=null, job=null, busy=false, currentView='setup', pollTimer=null;
 const el=(tag,text,className)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;};
 const badge=(text,state)=>el('span',text,`badge ${state}`);
-const labels={create:'Create',reuse:'Reuse',conflict:'Conflict',blocked:'Blocked'};
-const activityLabels={'archive/export':['Exporting policy archive','Policy archive exported'],connect:['Connecting to MDS','Management connected'],select:['Opening domain sessions','Domains and policy list loaded'],preview:['Scanning policy','Scan complete'],rename:['Updating preview','Preview updated'],stage:['Staging migration','Staging request completed'],finish:['Updating destination session','Destination session updated'],reconcile:['Checking publish result','Publish status checked'],recover:['Checking recovery','Recovery check complete'],logout:['Disconnecting','Disconnected'],'catalog/coverage':['Checking API coverage','API coverage loaded'],'catalog/update':['Updating API catalogs','API catalogs updated']};
+const labels={create:'Create',reuse:'Reuse',conflict:'Conflict',blocked:'Needs attention'};
+function waitingForGateway(o) {return o.status==='blocked'&&/Resolve the destination gateway mapping for .+ first\./.test(o.reason||'');}
+function objectBadge(o) {return badge(waitingForGateway(o)?'Waiting for gateway mapping':labels[o.status],waitingForGateway(o)?'warning':o.status);}
+function objectReason(o) {
+  if(!waitingForGateway(o))return o.reason;
+  const gateway=o.reason.match(/Resolve the destination gateway mapping for (.+?) first\./)?.[1];
+  return `This object depends on ${gateway}. In Object changes, resolve that gateway by choosing an existing destination gateway or creating a minimal one. This object will then be compared again automatically.`;
+}
+const activityLabels={'ips/manual':['Updating manual IPS choices','Manual IPS choices saved'],'ips/update':['Updating destination IPS','Destination IPS update completed'],'repository/update':['Updating destination repository','Destination repository checked'],'archive/export':['Exporting policy archive','Policy archive exported'],connect:['Connecting to MDS','Management connected'],select:['Opening domain sessions','Domains and policy list loaded'],preview:['Scanning policy','Scan complete'],rename:['Updating preview','Preview updated'],stage:['Staging migration','Staging request completed'],finish:['Updating destination session','Destination session updated'],reconcile:['Checking publish result','Publish status checked'],recover:['Checking recovery','Recovery check complete'],logout:['Disconnecting','Disconnected'],'catalog/coverage':['Checking API coverage','API coverage loaded'],'catalog/update':['Updating API catalogs','API catalogs updated']};
 let activity=null,activityPoll=null,activitySequence=0;
 let policyArchive=null;
 const jobTitles={exported:'Policy archive exported',staging:'Staging migration',staged:'Changes staged · not published',publishing:'Publishing changes',published:'Migration published',discarded:'Changes discarded',failed:'Migration stopped','publish-unknown':'Publish outcome unconfirmed','recovery-required':'Recovery required'};
@@ -81,7 +88,7 @@ async function run(message,fn) {
   try{await fn();status('');}catch(e){status(e.message,true);}finally{busy=false;updateControls();}
 }
 function updateControls() {
-  $$('[data-recovery], #refreshRecovery, #catalogLoad, #catalogUpdate, #catalogVersion').forEach(button=>button.disabled=busy);
+  $$('[data-recovery], #refreshRecovery, #catalogLoad, #catalogUpdate, #catalogVersion, #repositoryUpdate, #ipsUpdate').forEach(button=>button.disabled=busy);
   const unresolved=['staging','staged','publishing','publish-unknown','recovery-required'].includes(job?.state);
   for(const id of ['sourceDomain','targetDomain','policySelect','targetName','demoScenario'])$('#'+id).disabled=busy||unresolved;
   for(const id of ['loadPolicies','previewButton','rescanButton','logoutButton'])$("#"+id).disabled=busy||unresolved;
@@ -107,7 +114,7 @@ function setConnection(data) {
   $('#loginCard').hidden=true;$('#workspace').hidden=false;
   $('#connectionHost').textContent=data.host;$('#modeLabel').textContent=data.demo?'DEMO · synthetic data':data.mode==='pair'?'Management connected':'MDS connected';
   $('#domainForm').hidden=data.mode==='pair';
-  if(data.mode==='pair')$('#connectionHost').textContent=`${data.sourceDomain.name} → ${data.targetDomain.name}`;
+  if(data.mode==='pair')$('#connectionHost').textContent=`${data.sourceDomain.endpoint||data.sourceHost||data.sourceDomain.name} → ${data.targetDomain.endpoint||data.host||data.targetDomain.name}`;
   $('#sourceDomain').replaceChildren(option('','Select source domain'),...data.domains.map(d=>option(d.uid,d.name)));
   $('#targetDomain').replaceChildren(option('','Select destination domain'),...data.domains.map(d=>option(d.uid,d.name)));
   $('#demoScenarioRow').hidden=!data.demo;
@@ -193,15 +200,41 @@ $$('[data-action=export]').forEach(b=>b.addEventListener('click',()=>{
   if(!plan)return;const url=URL.createObjectURL(new Blob([JSON.stringify(plan,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='single-policy-move-plan.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }));
 function notice(title,text,state) {const n=el('div',undefined,`notice ${state}`);n.append(el('b',title),el('p',text));return n;}
+function manualIpsForm(check) {
+  const form=el('form',undefined,'rename-form manual-ips-form');
+  const item=check.manualIps;
+  if(item) {
+    const detail=el('details'),summary=el('summary',`Review ${item.affected.length} affected exception occurrence(s)`),list=el('ul');
+    for(const entry of item.affected)list.append(el('li',`${entry.layerName} · Rule ${entry.ruleUid} · Exception ${entry.exception.name||entry.exception.uid}`));
+    detail.append(summary,list);form.append(detail);
+    const label=el('label',undefined,'check-row'),ack=el('input');ack.type='checkbox';ack.required=true;
+    label.append(ack,el('span','I accept that these entire exceptions will be omitted. I will recreate or replace them manually in the destination before installing policy.'));
+    form.append(label);
+  }
+  const button=el('button',item?'Accept manual handling & rescan':'Undo manual handling & rescan');button.type='submit';form.append(button);
+  form.addEventListener('submit',event=>{event.preventDefault();if(busy)return;void run('Rechecking the policy with your manual IPS choices…',async()=>{
+    const result=await api('ips/manual',{planId:plan.id,objectUid:item?.uid||check.manualIpsUid,acknowledged:!!item,reset:!item});
+    plan=result.plan;$('#confirmName').value='';$('#confirmReviewed').checked=false;renderPlan();show('preflight');
+  });});
+  return form;
+}
 function renderPlan() {
-  lockNav();$('#routeSource').textContent=plan.sourceDomain.name;$('#routeTarget').textContent=plan.targetDomain.name;
+  $('#ipsUpdate').disabled=busy||!!(job&&!['failed','discarded','published'].includes(job.state));
+  $('#ipsUpdatePanel').hidden=connection?.demo||!plan?.layers.some(l=>l.kind==='threat');
+  $('#repositoryUpdatePanel').hidden=!plan?.checks.some(c=>!c.ok&&c.name.startsWith('External object prerequisite')&&/updatable.objects.repository/i.test(c.detail));
+  lockNav();
+  for(const [side,domain] of [['Source',plan.sourceDomain],['Target',plan.targetDomain]]) {
+    const address=domain.archive?'Policy archive':domain.endpoint|| (side==='Source'?connection?.sourceHost||connection?.host:connection?.host);
+    $('#route'+side).textContent=address||domain.name;
+    $('#route'+side+'Domain').textContent=address?domain.name:'';
+  }
   $('#navBlockers').textContent=plan.blockers?String(plan.blockers):'';
-  $('#planBadge').replaceWith(Object.assign(badge(plan.ready?'Ready for review':`${plan.blockers} blocker${plan.blockers===1?'':'s'}`,plan.ready?'pass':'fail'),{id:'planBadge'}));
-  $('#preflightSummary').replaceChildren(notice(plan.ready?'Preflight passed. Review the proposed changes.':'Migration blocked. Resolve these issues before continuing.',plan.ready?'No changes have been made. Review every object and rule before staging.':'Resolve name conflicts in Object changes. Other blockers require correction in SmartConsole and a rescan. No changes have been made.',plan.ready?'pass':'fail'));
-  const checks=[...plan.checks,{name:'Object definitions & name conflicts',ok:plan.counts.conflict+plan.counts.blocked===0,detail:plan.counts.conflict+plan.counts.blocked?`${plan.counts.conflict} conflicts and ${plan.counts.blocked} unsupported objects. Open Object changes for the exact definitions.`:`${plan.counts.create} objects to create; ${plan.counts.reuse} verified matches to reuse.`}];
-  $('#checks').replaceChildren(...checks.map(c=>{const row=el('div',undefined,`check-row-result ${['warning','notice'].includes(c.severity)?'warning':c.ok?'pass':'fail'}`);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');const circle=document.createElementNS(svg.namespaceURI,'circle');circle.setAttribute('cx','12');circle.setAttribute('cy','12');circle.setAttribute('r','9');svg.append(circle);const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',['warning','notice'].includes(c.severity)?'M12 7v6m0 3v1':c.ok?'m8 12 3 3 5-6':'m9 9 6 6m0-6-6 6');svg.append(path);const text=el('div');text.append(el('b',c.name),el('p',c.detail));row.append(svg,text,badge(['warning','notice'].includes(c.severity)?(c.severity==='notice'?'Notice':'Review'):c.ok?'Passed':'Blocked',['warning','notice'].includes(c.severity)?'warning':c.ok?'pass':'fail'));return row;}));
+  $('#planBadge').replaceWith(Object.assign(badge(plan.ready?'Ready for review':`${plan.blockers} checks need attention`,plan.ready?'pass':'fail'),{id:'planBadge'}));
+  $('#preflightSummary').replaceChildren(notice(plan.ready?'Preflight passed. Review the proposed changes.':'Resolve the remaining decisions and prerequisites before staging.',plan.ready?'No changes have been made. Review every object and rule before staging.':'Start in Object changes to choose gateway mappings and resolve conflicts. Dependent objects are checked again when you save a choice. For other prerequisites, follow the guidance below and rescan. No changes have been made.',plan.ready?'pass':'fail'));
+  const checks=[...plan.checks,{name:'Object definitions & name conflicts',ok:plan.counts.conflict+plan.counts.blocked===0,detail:plan.counts.conflict+plan.counts.blocked?`${plan.counts.conflict} choices to resolve; ${plan.objects.filter(waitingForGateway).length} objects waiting for gateway mapping; other objects needing attention: ${plan.objects.filter(o=>o.status==='blocked'&&!waitingForGateway(o)).length}. Open Object changes for the next steps.`:`${plan.counts.create} objects to create; ${plan.counts.reuse} verified matches to reuse.`}];
+  $('#checks').replaceChildren(...checks.map(c=>{const row=el('div',undefined,`check-row-result ${['warning','notice'].includes(c.severity)?'warning':c.ok?'pass':'fail'}`);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');const circle=document.createElementNS(svg.namespaceURI,'circle');circle.setAttribute('cx','12');circle.setAttribute('cy','12');circle.setAttribute('r','9');svg.append(circle);const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',['warning','notice'].includes(c.severity)?'M12 7v6m0 3v1':c.ok?'m8 12 3 3 5-6':'m9 9 6 6m0-6-6 6');svg.append(path);const text=el('div');text.append(el('b',c.name),el('p',c.detail));if(c.manualIps||c.manualIpsUid)text.append(manualIpsForm(c));row.append(svg,text,badge(['warning','notice'].includes(c.severity)?(c.severity==='notice'?'Notice':'Review'):c.ok?'Passed':'Needs attention',['warning','notice'].includes(c.severity)?'warning':c.ok?'pass':'fail'));return row;}));
   $('#planDescription').textContent=`${plan.package.name} → ${plan.targetName} · ${plan.ruleCount} rules across ${plan.layers.length} policy layers`;
-  $('#changeSummary').replaceChildren(...[['create','To create'],['reuse','To reuse'],['conflict','Conflicts'],['blocked','Blocked']].map(([k,label])=>{const d=el('div');d.append(el('strong',String(plan.counts[k])),el('span',label));return d;}));
+  $('#changeSummary').replaceChildren(...[['create','To create'],['reuse','To reuse'],['conflict','Conflicts'],['blocked','Needs attention']].map(([k,label])=>{const d=el('div');d.append(el('strong',String(plan.counts[k])),el('span',label));return d;}));
   $('#layerSelect').replaceChildren(...plan.layers.flatMap(l=>[option(l.uid,`${l.name} · ${l.kind||'access'}${l.kind==='access'&&!l.ordered?' · Inline':''}`),...(l.exceptionSets||[]).filter(e=>e.items.length).map(e=>option(`exceptions:${l.uid}:${e.ruleUid}`,`${l.name} · Exceptions for ${l.items.find(r=>r.uid===e.ruleUid)?.name||e.ruleUid}`))]),...(plan.nat.length?[option('nat','NAT rulebase')]:[]));
   $('#ruleCount').textContent=`${plan.ruleCount} rules`;
   $('#objectDetail').hidden=true;
@@ -222,20 +255,47 @@ function renderObjects() {
   $('#objectsBody').replaceChildren(...rows.map(o=>{
     const tr=el('tr');const name=el('td',o.name);if(o.importName)name.append(el('small',`Import as ${o.importName}`));if(o.target&&o.target.name!==o.name)name.append(el('small',`Maps to ${o.target.name}`));
     const dest=el('td',definition(o.target),'definition');
-    const outcome=el('td');outcome.append(badge(labels[o.status],o.status));
-    const detail=el('td'),button=el('button',(o.renameAllowed||o.profileResolutionAllowed)?(o.profileResolution?'Edit resolution':o.importName?'Edit rename':'Resolve'):'↗',(o.renameAllowed||o.profileResolutionAllowed)?'resolve-button':'detail-button');button.setAttribute('aria-label',`${(o.renameAllowed||o.profileResolutionAllowed)?'Resolve conflict for':'Compare'} ${o.name}`);button.addEventListener('click',()=>objectDetail(o));detail.append(button);
+    const outcome=el('td');outcome.append(objectBadge(o));
+    const detail=el('td'),button=el('button',(o.renameAllowed||o.profileResolutionAllowed||o.gatewayResolutionAllowed)?((o.profileResolution||o.gatewayResolution)?'Edit resolution':o.importName?'Edit rename':'Resolve'):'↗',(o.renameAllowed||o.profileResolutionAllowed||o.gatewayResolutionAllowed)?'resolve-button':'detail-button');button.setAttribute('aria-label',`${(o.renameAllowed||o.profileResolutionAllowed||o.gatewayResolutionAllowed)?'Resolve conflict for':'Compare'} ${o.name}`);button.addEventListener('click',()=>objectDetail(o));detail.append(button);
     tr.append(name,el('td',o.type),el('td',definition(o.source),'definition'),dest,outcome,detail);return tr;
   }));
   if(!rows.length){const row=el('tr'),td=el('td',plan.objects.length?'No objects match these filters.':'Object scan is unavailable until the preflight blockers are resolved.','empty-state');td.colSpan=6;row.append(td);$('#objectsBody').append(row);}
 }
 function objectDetail(o) {
   const panel=$('#objectDetail');panel.hidden=false;
-  const heading=el('div',undefined,'detail-heading');heading.append(el('h2',o.name),badge(labels[o.status],o.status));
+  const heading=el('div',undefined,'detail-heading');heading.append(el('h2',o.name),objectBadge(o));
   const compare=el('div',undefined,'definition-compare');
-  for(const [title,data] of [['Source definition',o.source],['Destination definition',o.target]]){const side=el('div');side.append(el('h3',title),el('pre',data?JSON.stringify(data,null,2):'No matching object. A new object will be created.'));compare.append(side);}
-  panel.replaceChildren(heading,el('p',o.reason),compare);
-  if((o.renameAllowed||o.profileResolutionAllowed) && plan.state==='preview' && !job) panel.append(renameForm(o));
+  for(const [title,data] of [['Source definition',o.source],[o.gatewayDefinition?'Planned minimal gateway':'Destination definition',o.gatewayDefinition||o.target]]){const side=el('div');side.append(el('h3',title),el('pre',data?JSON.stringify(data,null,2):o.gatewayResolutionAllowed?'Choose a gateway resolution below.':o.status==='create'?'No matching object. A new object will be created.':'No verified destination match yet. Resolve the item above before staging.'));compare.append(side);}
+  panel.replaceChildren(heading,el('p',objectReason(o)),compare);
+  if((o.renameAllowed||o.profileResolutionAllowed||o.gatewayResolutionAllowed) && plan.state==='preview' && !job) panel.append(o.gatewayResolutionAllowed?gatewayForm(o):renameForm(o));
   else if(o.status==='conflict') panel.append(el('p','Renaming resolves name collisions. Ambiguous exact matches still require review before migration.')); heading.tabIndex=-1;heading.focus({preventScroll:true});panel.scrollIntoView({behavior:'instant',block:'nearest'});
+}
+function gatewayForm(o) {
+  const form=el('form',undefined,'rename-form'),kind=o.type==='simple-cluster'?'cluster':'gateway';
+  const actionLabel=el('label',o.type==='simple-cluster'?'Cluster handling':'Gateway handling'),action=el('select');
+  action.append(new Option(`Use an existing destination ${kind}`,'reuse-gateway'));
+  action.append(new Option(`Create a minimal ${kind}`,'create-gateway'));
+  action.value=o.gatewayResolution||'reuse-gateway';actionLabel.append(action);
+  const targetLabel=el('label',`Destination ${kind}`),target=el('select');target.append(new Option(`Select a destination ${kind}`,''));
+  for(const candidate of o.gatewayCandidates||[])target.append(new Option(candidate.name,candidate.uid));
+  target.value=o.target?.uid||'';targetLabel.append(target);
+  const nameLabel=el('label',`New ${kind} name`),name=el('input');name.maxLength=100;name.value=o.importName||o.name+(plan.options?.objectSuffix||'');nameLabel.append(name);
+  const addressLabel=el('label','Destination IP address'),address=el('input');address.placeholder='IPv4 or IPv6 address';address.autocomplete='off';address.value=o.gatewayDefinition?.['ipv4-address']||o.gatewayDefinition?.['ipv6-address']||'';addressLabel.append(address);
+  const help=el('p','Existing destination settings remain unchanged. New gateways contain only the requested identity and destination defaults. Configure SIC, interfaces, topology, blades, routing, NAT and cloud onboarding manually before installing policy. Source gateway settings are not copied. Clusters also require members and cluster mode to be configured manually.','field-help');
+  const error=el('p',undefined,'status-message');error.setAttribute('role','alert');
+  const actions=el('div',undefined,'bottom-actions'),save=el('button','Apply gateway mapping','primary');save.type='submit';actions.append(save);
+  const toggle=()=>{const create=action.value==='create-gateway';targetLabel.hidden=create;target.required=!create;nameLabel.hidden=addressLabel.hidden=!create;name.required=address.required=create;save.textContent=create?`Use minimal ${kind} in preview`:`Apply ${kind} mapping`;};action.addEventListener('change',toggle);toggle();
+  const apply=async reset=>{
+    if(busy)return;busy=true;error.textContent='';for(const control of form.elements)control.disabled=true;updateControls();
+    try {
+      const result=await api('rename',{planId:plan.id,objectUid:o.uid,reset,gatewayAction:action.value,targetUid:target.value,newName:name.value,address:address.value});
+      plan=result.plan;$('#confirmName').value='';$('#confirmReviewed').checked=false;
+      renderPlan();renderObjects();objectDetail(plan.objects.find(row=>row.uid===o.uid));status(reset?'Gateway mapping removed.':'Gateway resolution applied. Review the updated preview and manual setup notice.');
+    }catch(e){error.textContent=e.message;}
+    finally{busy=false;for(const control of form.elements)control.disabled=false;updateControls();}
+  };
+  if(o.gatewayResolution){const undo=el('button','Undo gateway resolution');undo.type='button';undo.addEventListener('click',()=>void apply(true));actions.append(undo);}
+  form.append(actionLabel,targetLabel,nameLabel,addressLabel,help,error,actions);form.addEventListener('submit',event=>{event.preventDefault();void apply(false);});return form;
 }
 function renameForm(o) {
   const form=el('form',undefined,'rename-form');
@@ -314,10 +374,11 @@ function renderRules() {
 }
 function renderReview() {
   if(!plan)return;
-  const facts=el('dl',undefined,'review-facts');for(const [key,value] of [['Source',`${plan.sourceDomain.name} / ${plan.package.name}`],['Destination',`${plan.targetDomain.name} / ${plan.targetName}`],['Objects',`${plan.counts.create} create · ${plan.counts.reuse} reuse · ${plan.counts.conflict+plan.counts.blocked} blocked`],['Rules',`${plan.ruleCount} rules in ${plan.layers.length} policy layers`],['Preview expires',new Date(plan.expiresAt).toLocaleString()],['Migration API',plan.apiVersion||'Demo · no API calls'],['Source policy','Retained; no policy is installed on gateways']])facts.append(el('dt',key),el('dd',value));
+  const facts=el('dl',undefined,'review-facts');for(const [key,value] of [['Source',`${plan.sourceDomain.name} / ${plan.package.name}`],['Destination',`${plan.targetDomain.name} / ${plan.targetName}`],['Objects',`${plan.counts.create} create · ${plan.counts.reuse} reuse · ${plan.counts.conflict+plan.counts.blocked} need attention`],['Rules',`${plan.ruleCount} rules in ${plan.layers.length} policy layers`],['Preview expires',new Date(plan.expiresAt).toLocaleString()],['Migration API',plan.apiVersion||'Demo · no API calls'],['Source policy','Retained; no policy is installed on gateways']])facts.append(el('dt',key),el('dd',value));
   for(const check of plan.checks.filter(c=>['warning','notice'].includes(c.severity)))facts.append(el('dt',check.name),el('dd',check.detail));
   $('#reviewSummary').replaceChildren(facts);
-  $('#reviewGate').replaceChildren(notice(plan.ready?'Ready to stage after your review.':'Staging is blocked.',plan.ready?'Global assignments and both domain snapshots will be checked again before creating anything. A changed snapshot requires a new preview.':`${plan.blockers} blocker${plan.blockers===1?'':'s'} remain. Resolve them in the domains and rescan.`,plan.ready?'neutral':'fail'));
+  $('#reviewGate').replaceChildren(notice(plan.ready?'Ready to stage after your review.':'Resolve the remaining items before staging.',plan.ready?'Global assignments and both domain snapshots will be checked again before creating anything. A changed snapshot requires a new preview.':`${plan.blockers} checks need attention. Resolve choices in Object changes, then follow any remaining preflight guidance.`,plan.ready?'neutral':'fail'));
+  for(const followup of plan.manualFollowups||[])$('#reviewGate').append(notice(`Manual IPS follow-up · ${followup.name}`,`${followup.affected.length} exception occurrence(s) omitted by acknowledgment. Recreate or replace these in the destination before installing policy. Download the plan for the full source definitions.`,'warning'));
   $('#stageForm').hidden=!!job;
   renderJob();updateControls();
 }
@@ -330,6 +391,7 @@ function renderJob() {
   if(!activity&&['staging','publishing'].includes(job.state))beginActivity(job.state==='staging'?'stage':'finish');
   if(activity&&['stage','finish','reconcile'].includes(activity.path))jobActivity(job);
   $('#reviewGate').replaceChildren(notice('Migration status',job.message,['failed','recovery-required','publish-unknown'].includes(job.state)?'fail':'neutral'));
+  for(const followup of plan.manualFollowups||[])$('#reviewGate').append(notice(`Manual IPS follow-up · ${followup.name}`,`${followup.affected.length} exception occurrence(s) omitted by acknowledgment. Recreate or replace these in the destination before installing policy. Download the plan for the full source definitions.`,'warning'));
 
   const titles={staging:'Staging migration…',staged:'Changes staged · not published',publishing:'Publishing…',published:'Migration published',discarded:'Staged changes discarded',failed:'Migration stopped','publish-unknown':'Publish outcome not confirmed','recovery-required':'Manual recovery required'};
   $('#preflightSummary').replaceChildren(notice('Preview record · migration has been started',`Current state: ${titles[job.state]||job.state}. Open Review & migrate for the latest outcome. This is the pre-migration snapshot.`,'neutral'));
@@ -400,8 +462,8 @@ function renderArchive() {
   updateControls();
 }
 $('#archiveExport').addEventListener('click',()=>run('Exporting policy definitions…',async()=>{policyArchive=(await api('archive/export',{packageUid:$('#policySelect').value,apiVersion:$('#migrationApiVersion').value.trim(),options:migrationOptions(),format:$('#archiveFormat').value})).archive;renderArchive();}));
-function migrationOptions(){return {access:$('#scopeAccess').checked,threat:$('#scopeThreat').checked,https:$('#scopeHttps').checked,nat:$('#scopeNat').checked,includeSections:$('#includeSections').checked,objectSuffix:$('#objectSuffix').value,importTag:$('#importTag').value};}
-function setMigrationOptions(options={}){for(const [key,id] of Object.entries({access:'scopeAccess',threat:'scopeThreat',https:'scopeHttps',nat:'scopeNat',includeSections:'includeSections'}))$('#'+id).checked=options[key]!==false;$('#objectSuffix').value=options.objectSuffix||'';$('#importTag').value=options.importTag||'';}
+function migrationOptions(){return {access:$('#scopeAccess').checked,threat:$('#scopeThreat').checked,https:$('#scopeHttps').checked,nat:$('#scopeNat').checked,includeSections:$('#includeSections').checked,rebuildGateways:$('#rebuildGateways').checked,objectSuffix:$('#objectSuffix').value,importTag:$('#importTag').value,manualIps:(plan?.sourceDomain.archive||plan?.package.uid===$('#policySelect').value)?plan?.options?.manualIps||[]:[]};}
+function setMigrationOptions(options={}){for(const [key,id] of Object.entries({access:'scopeAccess',threat:'scopeThreat',https:'scopeHttps',nat:'scopeNat',includeSections:'includeSections'}))$('#'+id).checked=options[key]!==false;$('#rebuildGateways').checked=options.rebuildGateways===true;$('#objectSuffix').value=options.objectSuffix||'';$('#importTag').value=options.importTag||'';}
 function previewArchive(){return run('Reviewing archive against the destination…',async()=>{
   plan=(await api('preview',{archiveToken:policyArchive.token,targetName:$('#targetName').value,apiVersion:$('#migrationApiVersion').value.trim(),options:migrationOptions()})).plan;job=null;$('#confirmName').value='';$('#confirmReviewed').checked=false;renderPlan();show('preflight');
 });}
@@ -417,4 +479,22 @@ $('#archiveDownload').addEventListener('click',()=>run('Downloading archive…',
   const response=await fetch('/api/archive/download',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:policyArchive.token})});
   if(!response.ok){const result=await response.json();throw new Error(result.error||'Archive download failed.');}
   const url=URL.createObjectURL(await response.blob()),link=el('a');link.href=url;link.download=policyArchive.fileName||'policy-package.cma.gz';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}));
+
+$('#repositoryUpdate').addEventListener('click',()=>run('Updating the destination repository…',async()=>{
+  $('#repositoryUpdateStatus').textContent='Updating the destination repository…';
+  try {
+    const result=await api('repository/update',{planId:plan.id});
+    plan=result.plan;$('#confirmName').value='';$('#confirmReviewed').checked=false;
+    $('#repositoryUpdateStatus').textContent=result.message;updateControls();
+  }catch(error){$('#repositoryUpdateStatus').textContent=error.message;throw error;}
+}));
+
+$('#ipsUpdate').addEventListener('click',()=>run('Updating destination IPS content…',async()=>{
+  $('#ipsUpdateStatus').textContent='Requesting the latest destination IPS content. This may take several minutes…';
+  try {
+    const result=await api('ips/update',{planId:plan.id});
+    plan=result.plan;$('#confirmName').value='';$('#confirmReviewed').checked=false;
+    $('#ipsUpdateStatus').textContent=result.message;updateControls();
+  }catch(error){$('#ipsUpdateStatus').textContent=error.message;throw error;}
 }));

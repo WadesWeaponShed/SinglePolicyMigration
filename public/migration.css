@@ -63,3 +63,12 @@
 .project-credit p{font-size:12px;line-height:1.6;margin:14px 0 0}
 .project-credit .upstream-credit{margin-top:5px}
 .project-credit a{overflow-wrap:anywhere}
+
+.check-row-result > .badge{align-self:start}
+.manual-ips-form .check-row{align-items:flex-start}
+.manual-ips-form .check-row input{flex-shrink:0;margin-top:2px}
+
+.plan-route > div{min-width:0}
+.plan-route strong{overflow-wrap:anywhere}
+.plan-route small{display:block;color:var(--muted);margin-top:3px}
+.plan-route > svg{flex-shrink:0}

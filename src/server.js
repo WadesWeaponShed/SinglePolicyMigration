@@ -66,6 +66,9 @@ export function createApp(workbench=new Workbench(new SessionManager({taskPollAt
             case '/api/session':result=workbench.describe(workbench.get(id));break;
             case '/api/select':result=await workbench.select(id,body);break;
             case '/api/preview':result=await workbench.preview(id,body);break;
+            case '/api/ips/manual':result=await workbench.manualIps(id,body);break;
+            case '/api/ips/update':result=await workbench.updateIps(id,body);break;
+            case '/api/repository/update':result=await workbench.updateRepository(id,body);break;
             case '/api/rename':result=await workbench.rename(id,body);break;
             case '/api/stage':result=await workbench.stage(id,body);break;
             case '/api/job':{const c=workbench.get(id);result={job:c.job||null,activity:c.activity||null};break;}

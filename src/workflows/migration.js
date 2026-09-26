@@ -5,7 +5,7 @@ import {kindOf,policyFields,policyLayerFields,packagePayload,schemaPolicyFields}
 import { discardChanges } from './discard.js';
 import { randomUUID } from 'node:crypto';
 import { migrationApi } from './compatibility.js';
-import { normalizedObject, equivalentAcrossNames, builtin, compareObjects, resolveObjectRenames, fields, hash, semantic, metadata, objectPayload, pick, refs, translate, uidOf, unsupported } from './objects.js';
+import { gatewayTypes, normalizedObject, equivalentAcrossNames, builtin, compareObjects, resolveObjectRenames, fields, hash, semantic, metadata, objectPayload, pick, refs, translate, uidOf, unsupported } from './objects.js';
 
 export const ruleFields = ['name','action','action-settings','content','content-direction','content-negate','custom-fields','destination','destination-negate','enabled','inline-layer','install-on','service','service-negate','service-resource','source','source-negate','tags','time','track','user-check','vpn','comments'];
 export const natFields = ['name','enabled','install-on','method','original-destination','original-service','original-source','translated-destination','translated-service','translated-source','comments','tags'];
@@ -150,8 +150,20 @@ export async function bulkDestinationDefinitions(sessions,targetId,candidates,on
   return result;
 }
 
-export async function readComparisonObject(sessions,id,uid) {
-  const reply=await sessions.command(id,'show-object',{uid,'details-level':'full'});
+export async function readComparisonObject(sessions,id,uid,reference,{allowNameFallback=false}={}) {
+  let reply;
+  try {reply=await sessions.command(id,'show-object',{uid,'details-level':'full'});}
+  catch(error) {
+    if(reference?.type!=='CpmiSdTopicPerProfileDynamic'||!builtin(reference)||!/not found|not.*exist/i.test(error.message))throw error;
+    let byName=false;
+    try {reply=await sessions.command(id,'show-threat-protection',{uid,'details-level':'full'});}
+    catch(typedError) {
+      if(!allowNameFallback||!/not found|not.*exist/i.test(typedError.message))throw typedError;
+      reply=await sessions.command(id,'show-threat-protection',{name:reference.name,'details-level':'full'});byName=true;
+    }
+    const found=reply.object||reply;
+    if(!found.uid||!byName&&found.uid!==uid||found.name!==reference.name||found.type!==reference.type||!builtin(found))throw new Error('Destination IPS protection identity could not be verified.');
+  }
   const summary=reply.object||reply;
   if(summary.type!=='threat-profile')return reply;
   const detailed=await sessions.command(id,'show-threat-profile',{uid,'details-level':'full'});
@@ -160,6 +172,48 @@ export async function readComparisonObject(sessions,id,uid) {
   return {object:profile};
 }
 
+export async function resolveNatGateway(sessions,id,object,cache=new Map()) {
+  const name=object['nat-settings']?.['install-on'];
+  if(object['nat-settings']?.['auto-rule']!==true||typeof name!=='string'||name==='All'||/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(name))return object;
+  const key=`${id}:${name}`;
+  if(!cache.has(key))cache.set(key,(async()=>{
+    const candidates=(await collection(sessions,id,'show-objects','objects',{filter:name,'details-level':'full'})).filter(o=>o.name===name&&gatewayTypes.has(o.type));
+    if(candidates.length!==1||!candidates[0].uid)throw new Error(`Automatic NAT gateway ${name} for ${object.name} requires one exact gateway or cluster match; found ${candidates.length}.`);
+    return candidates[0].uid;
+  })());
+  return {...object,'nat-settings':{...object['nat-settings'],'install-on':await cache.get(key)}};
+}
+
+export function normalizeLayerResponse(layer,policySchema) {
+  const result={...layer};
+  if(kindOf(layer)==='threat')for(const key of ['shared','permissions-profiles']) {
+    const empty=key==='shared'?(layer[key]===false||layer['ips-layer']===true&&layer[key]===true):Array.isArray(layer[key])&&layer[key].length===0;
+    if(empty&&!policyLayerFields(layer,layerFields,policySchema).includes(key))delete result[key];
+  }
+  return result;
+}
+
+// Omit whole acknowledged exceptions, never individual protection selectors:
+// removing a selector could broaden the remaining exception to other traffic.
+export function ipsManualImpact(layers,uid) {
+  const contains=value=>value===uid||(Array.isArray(value)?value.some(contains):value&&typeof value==='object'?value.uid===uid||Object.values(value).some(contains):false);
+  const affected=[];
+  for(const layer of layers)for(const set of layer.exceptionSets||[])for(const item of set.items) {
+    if(item.type==='threat-exception'&&contains(item['protection-or-site']))affected.push({layerUid:layer.uid,layerName:layer.name,ruleUid:set.ruleUid,exception:structuredClone(item)});
+  }
+  return {affected,fingerprint:hash(fingerprintValue(affected))};
+}
+export function applyManualIps(layers,choices,source) {
+  const followups=[];
+  for(const choice of choices) {
+    const protection=source.get(choice.uid),impact=ipsManualImpact(layers,choice.uid);
+    if(protection?.type!=='CpmiSdTopicPerProfileDynamic'||!impact.affected.length||impact.fingerprint!==choice.fingerprint)throw new Error('The acknowledged IPS exceptions changed or are no longer in scope. Remove the manual IPS choice and review a fresh preview.');
+    followups.push({uid:choice.uid,name:protection.name,...impact});
+  }
+  const omitted=new Set(followups.flatMap(f=>f.affected.map(a=>`${a.layerUid}:${a.ruleUid}:${a.exception.uid}`)));
+  for(const layer of layers)for(const set of layer.exceptionSets||[])set.items=set.items.filter(item=>!omitted.has(`${layer.uid}:${set.ruleUid}:${item.uid}`));
+  return followups;
+}
 export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootId,targetRootId=rootId,sourceDomain,targetDomain,packageUid,targetName,renames={},options={},apiVersion,engineRevision,onProgress=()=>{}}) {
   if(sourceRootId===undefined||targetRootId===undefined)throw new Error('Explicit management contexts are required.');
   options=normalizeMigrationOptions(options);
@@ -204,7 +258,8 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
     const data=await readRulebase(sessions,sourceId,`show-${kind}-rulebase`,{uid,package:pkg.uid});
     data.dictionary.forEach(o=>source.set(o.uid,o));
     const defaults=layerDefaults(kind,sessions.catalog,policySchema);
-    const layer={...defaults,...config,kind,slot,ordered,items:options.includeSections?data.items:data.items.filter(i=>!i.type.endsWith('section')),targetName:`${targetName} / ${config.name}`};
+    if(kind==='threat'&&config['ips-layer']===true&&config.shared===true&&!policyLayerFields({kind},layerFields,policySchema).includes('shared'))checks.push({name:`IPS layer isolation · ${config.name}`,ok:true,severity:'notice',detail:'Copy the selected package’s shared IPS rules into a separate destination layer. Sharing with other source packages is not recreated; those packages remain unchanged. All copied rules and exceptions are verified.'});
+    const layer=normalizeLayerResponse({...defaults,...config,kind,slot,ordered,items:options.includeSections?data.items:data.items.filter(i=>!i.type.endsWith('section')),targetName:`${targetName} / ${config.name}`},policySchema);
     layers.push(layer);
     for(const r of data.items) if(r['inline-layer']) await readLayer(r['inline-layer'],false);
     if(kind==='threat') {
@@ -246,16 +301,18 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
     checks.push({name:'NAT package context',ok:true,severity:'notice',detail:'Create an empty Access layer so Check Point can host the selected NAT rulebase. No source Access rules are copied.'});
   }
   checks.push({name:'Rulebase coverage',ok:layers.length>0||nat.length>0,detail:layers.length||nat.length?`${layers.length} policy layers and ${nat.filter(r=>r.type==='nat-rule').length} manual NAT rules selected.`:'No rules or layers found in the selected scope.'});
+  const manualFollowups=applyManualIps(layers,options.manualIps,source);
+  for(const item of manualFollowups)checks.push({name:`Manual IPS follow-up · ${item.name}`,ok:true,severity:'warning',detail:`Acknowledged: omit ${item.affected.length} affected exception occurrence(s). Recreate or replace them manually in the destination before installing policy. Full source exceptions are retained in the downloaded plan.`,manualIpsUid:item.uid});
   const allItems=[...layers.flatMap(l=>[...l.items,...(l.exceptionSets||[]).flatMap(e=>e.items)]),...nat];
   const archiveDefinitions=new Set(source.keys());
-  const needed=new Set();
-  function collect(value,key) {
+  const needed=new Set(),origins=new Map(),natGatewayCache=new Map();
+  function collect(value,key,origin='policy') {
     if(externalIdentityFields.has(key))return;
-    if(Array.isArray(value)) return value.forEach(item=>collect(item,key));
-    if(value&&typeof value==='object') {if(value.uid){needed.add(value.uid);source.set(value.uid,source.get(value.uid)||value);}else Object.entries(value).forEach(([k,v])=>collect(v,k));}
-    else if(typeof value==='string'&&(/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)||source.has(value))) needed.add(value);
+    if(Array.isArray(value)) return value.forEach(item=>collect(item,key,origin));
+    if(value&&typeof value==='object') {if(value.uid){needed.add(value.uid);if(!origins.has(value.uid))origins.set(value.uid,origin);source.set(value.uid,source.get(value.uid)||value);}else Object.entries(value).forEach(([k,v])=>collect(v,k,`${origin}.${k}`));}
+    else if(typeof value==='string'&&(/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)||source.has(value)))  {needed.add(value);if(!origins.has(value))origins.set(value,origin);}
   }
-  for(const item of allItems) collect(pick(item,policyFields(item,item.type==='nat-rule'?natFields:ruleFields,policySchema)));
+  for(const item of allItems) collect(pick(item,policyFields(item,item.type==='nat-rule'?natFields:ruleFields,policySchema)),undefined,`${item.type} ${item.name||item.uid}`);
   for(const l of layers) {collect(pick(l,['tags']));for(const set of l.exceptionSets||[])for(const group of set.groups)collect(pick(group,['tags']));}
   // Fetch every referenced object in full and recursively traverse writable dependency fields.
   const fetched=new Set();
@@ -305,14 +362,20 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
       const found=reply.object||reply;
       if(!builtin(found))throw new Error(`Archive dependency ${uid} is not a verified built-in; supply its real source definition.`);
       result={object:found};
-    } else result=sourceDomain.archive?await sessions.command(sourceId,'show-object',{uid,'details-level':'full'}):await readComparisonObject(sessions,sourceId,uid);
+    } else {
+      try {result=sourceDomain.archive?await sessions.command(sourceId,'show-object',{uid,'details-level':'full'}):await readComparisonObject(sessions,sourceId,uid,reference);}
+      catch(error){error.message=`Cannot read source dependency ${reference?.name||uid}${reference?.type?` (${reference.type})`:''} referenced by ${origins.get(uid)||'policy'}: ${error.message}`;throw error;}
+    }
+    if(!sourceDomain.archive)result={object:await resolveNatGateway(sessions,sourceId,result.object||result,natGatewayCache)};
     return result;
   },(uid,result)=>{
     if(result===null)return;
     const obj=result.object||result;
     if(obj.uid!==uid||!obj.name||!obj.type) throw new Error(`Cannot resolve referenced object ${uid}.`);
     source.set(uid,obj); fetched.add(uid);
-    collect(pick(normalizedObject(obj),writableFields(obj.type,objectSchema,fields)));
+    // Unsupported definitions still belong in the preview. Preserve their raw
+    // references and let comparison report the object-specific blocker.
+    if(!(options.rebuildGateways&&gatewayTypes.has(obj.type)))collect(pick(unsupported(obj,objectSchema)?obj:normalizedObject(obj),writableFields(obj.type,objectSchema,fields)),undefined,`${obj.type} ${obj.name}`);
     report(`Source definitions: ${fetched.size} objects read · ${obj.name}`);
   },sourceDomain.archive?1:6);
   const objects=[...fetched].map(uid=>source.get(uid));
@@ -321,10 +384,10 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
   for(const obj of objects.filter(builtin)) {
     if(destination.some(d=>d.uid===obj.uid&&d.type===obj.type)) continue;
     try {
-      const result=await sessions.command(targetId,'show-object',{uid:obj['archive-reference-uid']||obj.uid,'details-level':'full'});
+      const result=await readComparisonObject(sessions,targetId,obj['archive-reference-uid']||obj.uid,obj,{allowNameFallback:true});
       const found=result.object||result;
       if(found.uid&&found.name&&found.type) destination.push(found);
-    } catch { /* compareObjects will block an unverified built-in. */ }
+    } catch(error) {if(obj.type==='CpmiSdTopicPerProfileDynamic')checks.push({name:`IPS protection prerequisite · ${obj.name}`,ok:false,manualIps:ipsManualImpact(layers,obj.uid).affected.length?{uid:obj.uid,name:obj.name,...ipsManualImpact(layers,obj.uid)}:undefined,detail:`Destination protection could not be verified: ${error.message}. Check destination IPS content availability and update status; this exception will not be silently omitted.`});}
   }
   // Keep all identities for name collisions, but expand supported definitions
   // and referenced built-ins only. Unsupported group members cannot be reused.
@@ -337,9 +400,9 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
   let destinationRead=0;
   report(`Reading full destination definitions · ${pending.size} objects discovered.`);
   await readDependencyFrontiers(pending,async uid=>{
-    if(bulkDefinitions.has(uid))return {object:bulkDefinitions.get(uid)};
+    if(bulkDefinitions.has(uid))return {object:await resolveNatGateway(sessions,targetId,bulkDefinitions.get(uid),natGatewayCache)};
     let result;
-    try {result=await readComparisonObject(sessions,targetId,uid);}
+    try {result=await readComparisonObject(sessions,targetId,uid,dm.get(uid));result={object:await resolveNatGateway(sessions,targetId,result.object||result,natGatewayCache)};}
     catch(error){error.message=`Cannot read destination definition ${dm.get(uid)?.name||uid} (show-object): ${error.message}`;throw error;}
     return result;
   },(uid,result)=>{
@@ -350,7 +413,7 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
     dm.set(uid,obj);
     const enqueue=uid=>{if(!dm.has(uid)||expandable(dm.get(uid)))pending.add(uid);};
     const walk=(v,key)=>{if(externalIdentityFields.has(key))return;if(Array.isArray(v))v.forEach(item=>walk(item,key));else if(v&&typeof v==='object'){if(v.uid)enqueue(v.uid);else Object.entries(v).forEach(([k,item])=>walk(item,k));}else if(typeof v==='string'&&/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(v))enqueue(v);};
-    walk(pick(obj,writableFields(obj.type,objectSchema,fields)));
+    if(!(options.rebuildGateways&&gatewayTypes.has(obj.type)))walk(pick(obj,writableFields(obj.type,objectSchema,fields)));
     report(`Destination definitions: ${++destinationRead} of ${pending.size} discovered objects read · ${obj.name}`);
   });
   report('Comparing definitions and building the migration preview…');
@@ -393,7 +456,7 @@ export async function scan({sessions,sourceId,targetId,rootId,sourceRootId=rootI
     const collision=[...dm.values()].some(o=>o.name.toLowerCase()===group.targetName.toLowerCase());
     checks.push({name:`Exception group · ${group.name}`,ok:!collision,detail:collision?'Destination group name exists. Choose a different policy name.':`Create ${group.targetName}, attached only to imported threat rules.`});
   }
-  const data={apiVersion,engineRevision,objectSchema,policySchema,sourceDomain,targetDomain,targetName,checks,objects:compareObjects(objects,[...dm.values()],objectSchema),layers,package:pkg,inventory:[...dm.values()],nat,renames,options};
+  const data={manualFollowups,apiVersion,engineRevision,objectSchema,policySchema,sourceDomain,targetDomain,targetName,checks,objects:compareObjects(objects,[...dm.values()],objectSchema,options),layers,package:pkg,inventory:[...dm.values()],nat,renames,options};
   const prepared=preparePlanObjects(data);
   checks.push(...validatePlanCommands(sessions,prepared));
   return buildPlan(data);
@@ -411,7 +474,7 @@ export function validatePlanCommands(api,plan) {
   };
   for(const row of plan.objects.filter(o=>o.status==='create')) {
     validate(`add-${row.type}`,()=>plannedObjectPayload(row,plan,mapping));
-    if(['simple-gateway','simple-cluster'].includes(row.type)&&row.source['logs-settings'])validate(`set-${row.type}`,()=>({uid:row.uid,'logs-settings':plannedObjectPayload(row,plan,mapping)['logs-settings']}));
+    if(['simple-gateway','simple-cluster'].includes(row.type)&&!row.gatewayDefinition&&row.source['logs-settings'])validate(`set-${row.type}`,()=>({uid:row.uid,'logs-settings':plannedObjectPayload(row,plan,mapping)['logs-settings']}));
   }
   for(const layer of plan.layers) {
     validate(`add-${kindOf(layer)}-layer`,()=>({...layerPayload(layer,mapping,plan.policySchema),name:layer.targetName,...kindOf(layer)==='https'?{}:{'add-default-rule':false}}));
@@ -462,11 +525,11 @@ function fingerprintValue(v,key='') {
   if(v&&typeof v==='object') return Object.fromEntries(Object.entries(v).filter(([k])=>!responseOnly.has(k)).map(([k,x])=>[k,fingerprintValue(x,k)]));
   return v;
 }
-const snapshotFields=['apiVersion','sourceDomain','targetDomain','targetName','checks','objects','layers','package','inventory','nat','renames','options','importTagUid','objectSchema','policySchema','engineRevision'];
+const snapshotFields=['apiVersion','sourceDomain','targetDomain','targetName','checks','objects','layers','package','inventory','nat','renames','options','importTagUid','objectSchema','policySchema','engineRevision','manualFollowups'];
 function planSnapshot(plan) {return fingerprintValue(pick(plan,snapshotFields));}
 export function changedPlanSections(before,after) {
   const left=planSnapshot(before),right=planSnapshot(after);
-  const labels={apiVersion:'API version',sourceDomain:'source domain',targetDomain:'destination domain',targetName:'destination package name',checks:'preflight checks',objects:'object definitions or mappings',layers:'access layers or rules',package:'source package settings',inventory:'destination inventory',nat:'manual NAT rules',renames:'rename choices',options:'migration options',importTagUid:'import tag',objectSchema:'object API schema',policySchema:'policy API schema',engineRevision:'native engine version'};
+  const labels={apiVersion:'API version',sourceDomain:'source domain',targetDomain:'destination domain',targetName:'destination package name',checks:'preflight checks',objects:'object definitions or mappings',layers:'access layers or rules',package:'source package settings',inventory:'destination inventory',nat:'manual NAT rules',renames:'rename choices',options:'migration options',importTagUid:'import tag',objectSchema:'object API schema',policySchema:'policy API schema',manualFollowups:'acknowledged manual IPS exceptions',engineRevision:'native engine version'};
   return snapshotFields.filter(key=>hash(left[key]??null)!==hash(right[key]??null)).map(key=>labels[key]);
 }
 function supportsImportTag(type,plan) {return type!=='tag'&&!(type==='threat-profile'&&plan.apiVersion==='v2.1')&&writableFields(type,plan.objectSchema,fields).includes('tags');}
@@ -493,7 +556,7 @@ function preparePlanObjects(data) {
   return {...data,checks,objects:rows,importTagUid};
 }
 export function plannedObjectPayload(row,plan,mapping) {
-  const body=objectPayload(row.source,mapping,plan.objectSchema);
+  const body=objectPayload(row.gatewayDefinition||row.source,mapping,plan.objectSchema);
   // CSV archives omit empty values. Make common creation defaults explicit so
   // independent readback compares them instead of silently ignoring extra data.
   const writable=writableFields(row.type,plan.objectSchema,fields);
@@ -516,17 +579,18 @@ export function buildPlan(data) {
     const warnings=expectedCopyWarnings(row,data);
     if(warnings.length)data.checks.push({name:`Address duplicate copy · ${row.importName}`,ok:true,severity:'notice',detail:`The requested suffix creates a separate host with an existing IP address. Staging may acknowledge only these specific warnings: ${warnings.join('; ')}. The existing objects are retained.`});
   }
-  data.checks=data.checks.filter(check=>check.name!=='Gateway trust');
+  data.checks=data.checks.filter(check=>check.name!=='Gateway trust'&&!check.name.startsWith('Gateway rebuild · '));
+  for(const row of data.objects.filter(o=>o.gatewayResolution))data.checks.push({name:`Gateway rebuild · ${row.name}`,ok:true,severity:'notice',detail:row.reason});
   if(data.objects.some(o=>o.status==='create'&&['simple-gateway','simple-cluster'].includes(o.type)))data.checks.push({name:'Gateway trust',ok:true,severity:'notice',detail:'New gateway and cluster definitions require SIC to be established separately in the destination before use. Existing source trust is retained. The app does not reset SIC or install policy.'});
   data.checks=data.checks.filter(check=>!check.name.startsWith('Gateway management · '));
-  for(const row of data.objects.filter(o=>o.status==='create'&&['simple-gateway','simple-cluster'].includes(o.type))) {
+  for(const row of data.objects.filter(o=>o.status==='create'&&!o.gatewayDefinition&&['simple-gateway','simple-cluster'].includes(o.type))) {
     const values=gatewayManagementFields.flatMap(key=>row.source[key]||[]);
     const unresolved=values.filter(value=>typeof value==='string'&&value!==data.sourceDomain.name&&!data.objects.some(o=>o.uid===value));
     data.checks.push({name:`Gateway management · ${row.name}`,ok:!unresolved.length,severity:unresolved.length?'error':'notice',detail:unresolved.length?`Named management/log-server references need explicit destination mapping: ${[...new Set(unresolved)].join(', ')}.`:`References to source management ${data.sourceDomain.name} become destination management ${data.targetDomain.name}. Disabled blade settings are omitted; active settings are preserved and verified.`});
   }
   data.checks=data.checks.filter(check=>!check.name.startsWith('Cluster member · '));
   const memberNames=new Set(data.inventory.map(o=>o.name.toLowerCase()));
-  for(const row of data.objects.filter(o=>o.status==='create'&&o.type==='simple-cluster'))for(const member of normalizedObject(row.source).members||[]) {
+  for(const row of data.objects.filter(o=>o.status==='create'&&o.type==='simple-cluster'))for(const member of normalizedObject(row.gatewayDefinition||row.source).members||[]) {
     const name=member.name+(data.options?.objectSuffix||'');
     const collision=memberNames.has(name.toLowerCase())||data.objects.some(o=>(o.importName||o.name).toLowerCase()===name.toLowerCase());
     data.checks.push({name:`Cluster member · ${name}`,ok:!collision&&name.length<=100,detail:collision?'A member name already exists. Choose a different object suffix; existing destination members will not be attached or modified.':name.length>100?'The suffixed member name exceeds 100 characters.':`Create member ${name} in ${row.importName||row.name}. Establish its SIC separately.`});memberNames.add(name.toLowerCase());
@@ -650,7 +714,14 @@ export function verifyRulebase(expectedItems, actualItems, mapping, objects, lab
           for(const field of ['frequency','custom-frequency','confirm']) delete received[field];
         }
       }
-      if(received===undefined || hash(normalize(received))!==hash(value)) throw new Error(`Staged rule verification failed: ${label}, item ${i+1}, ${key}.`);
+      // Object lists are match sets; Check Point may reorder them on readback.
+      // Sort only known set-valued fields, retaining duplicates and exact UIDs.
+      const setFields=new Set(['source','destination','service','content','time','install-on','tags','protected-scope','protection-or-site']);
+      const canonical=value=>{const result=normalize(value);return setFields.has(key)&&Array.isArray(result)?[...result].sort((a,b)=>hash(a).localeCompare(hash(b))):result;};
+      if(received===undefined || hash(canonical(received))!==hash(canonical(value))) {
+        const describe=value=>{const text=JSON.stringify(normalize(value))??'not returned';return text.length>1500?text.slice(0,1500)+'…':text;};
+        throw new Error(`Staged rule verification failed: ${label}, item ${i+1}${expected.name?` (${expected.name})`:''}, ${key}. Expected ${describe(value)}; received ${describe(received)}.`);
+      }
     }
   }
 }
@@ -676,10 +747,17 @@ function layerPayload(layer, mapping = new Map(), schema) {
 // Compare full writable definitions, including server-added writable fields. Unknown
 // defaults therefore fail closed instead of silently changing migration semantics.
 const profileResponseSections=['zero-phishing-settings','anti-virus-settings','anti-bot-settings','mail-exceptions','threat-emulation-settings','threat-extraction-settings','mail-general','mail-mime-nesting'];
-export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema,policySchema,expectedName,sourceDefinition,apiVersion}) {
+export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema,policySchema,expectedName,sourceDefinition,apiVersion,gatewayRebuild=false}) {
   const label=type==='access-layer'?'layer':'object';
   if(!actual || actual.uid!==uid || actual.type!==type) throw new Error(`Staged ${label} identity verification failed: ${expected.name}.`);
   if(expectedName&&actual.name!==expectedName)throw new Error(`Staged object name differs: expected ${expectedName}, received ${actual.name}.`);
+  if(gatewayRebuild) {
+    if(!gatewayTypes.has(type))throw new Error('Minimal gateway verification requires a gateway or cluster.');
+    // Rebuild mode intentionally accepts destination-generated defaults. Only
+    // fields explicitly requested by this migration form the readback contract.
+    for(const [key,value] of Object.entries(expected))if(actual[key]===undefined||hash(normalizedReferences(value))!==hash(normalizedReferences(actual[key])))throw new Error(`Staged minimal gateway verification failed: ${expected.name}, ${key}.`);
+    return;
+  }
   const writable=type.endsWith('-layer')?policyLayerFields({kind:type.split('-')[0]},layerFields,policySchema):writableFields(type,objectSchema,fields);
   if(type.endsWith('-layer')&&!writable.includes('additional-permission-profiles')&&!Object.hasOwn(expected,'additional-permission-profiles')&&Array.isArray(actual['additional-permission-profiles'])&&actual['additional-permission-profiles'].length===0) {
     actual={...actual};delete actual['additional-permission-profiles'];
@@ -687,6 +765,23 @@ export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema
   if(type==='threat-layer')for(const key of ['shared','permissions-profiles']) {
     const empty=key==='shared'?actual[key]===false:Array.isArray(actual[key])&&actual[key].length===0;
     if(empty&&!writable.includes(key)&&!Object.hasOwn(expected,key)){actual={...actual};delete actual[key];}
+  }
+  if(type==='application-site'&&sourceDefinition&&!Object.hasOwn(sourceDefinition,'match-settings')&&!Object.hasOwn(expected,'match-settings')&&!writable.includes('match-settings')) {
+    const settings=actual['match-settings'];
+    // Newer servers expose the legacy recommended-services default even when
+    // an older API cannot write it. Do not waive customized matching semantics.
+    const recommendedWebServices=[
+      ['97aeb3d4-9aea-11d5-bd16-0090272ccb30','http','tcp','80'],
+      ['97aeb443-9aea-11d5-bd16-0090272ccb30','https','tcp','443'],
+      ['8eddeaa0-259d-448f-95b6-490a39f55962','HTTP_proxy','tcp','8080'],
+      ['704fbf04-1714-49a1-a750-38c0e4139a11','HTTPS_proxy','tcp','8080'],
+      ['706c720f-c90d-4aa4-8ab4-967e3887f2f0','quic','udp','443']
+    ];
+    const services=settings?.['recommended-services'];
+    const validRecommendations=services===undefined||(Array.isArray(services)&&[4,5].includes(services.length)&&new Set(services.map(service=>service?.uid)).size===services.length&&recommendedWebServices.slice(0,4).every(([uid])=>services.some(service=>service?.uid===uid))&&services.every(service=>service&&Object.keys(service).every(key=>['uid','name','type','port'].includes(key))&&recommendedWebServices.some(([uid,name,type,port])=>service.uid===uid&&service.name===name&&service.type===type&&service.port===port)));
+    if(settings&&settings.mode==='recommended'&&validRecommendations&&Object.keys(settings).every(key=>['mode','override-services','recommended-services'].includes(key))&&(!Object.hasOwn(settings,'override-services')||(Array.isArray(settings['override-services'])&&settings['override-services'].length===0))) {
+      actual={...actual};delete actual['match-settings'];
+    }
   }
   if(type==='threat-profile'&&sourceDefinition) {
     actual={...actual};
@@ -706,7 +801,7 @@ export function verifyCreatedDefinition(expected, actual, {uid,type,objectSchema
   }
   const unknown=type.endsWith('-layer')?Object.keys(actual).filter(key=>!writable.includes(key) && !metadata.has(key) && !(type==='threat-layer'&&key==='ips-layer') && !(type==='access-layer'&&key==='parent-layer')):[];
   if(unknown.length) throw new Error(`Staged ${label} verification failed: ${expected.name}, unmapped settings ${unknown.join(', ')}.`);
-  if(!type.endsWith('-layer')&&unsupported(actual,objectSchema))throw new Error(`Staged object verification failed: ${expectedName||expected.name}, unmapped settings or unsupported definition: ${unsupported(actual,objectSchema)}`);
+  if(!type.endsWith('-layer')&&unsupported(actual,objectSchema))throw new Error(`Staged object verification failed: ${expectedName||expected.name}, unmapped settings or unsupported definition: ${unsupported(actual,objectSchema)}${Object.hasOwn(actual,'match-settings')?` Returned match-settings: ${JSON.stringify(actual['match-settings'])}.`:''}`);
   const normalized={...Object.fromEntries(Object.entries(type.endsWith('-layer')?actual:normalizedObject(actual)).map(([key,value])=>[key,normalizedReferences(value)])),type};
   if(type==='data-center-object')normalized['data-center-name']=actual['data-center']?.name||actual['data-center-name'];
   // Cleanup actions are enums, so retain their name before expanding UID references.
@@ -775,7 +870,7 @@ export async function stagePlan({sessions,targetId,plan,onProgress=()=>{}}) {
     const pending=plan.objects.filter(o=>o.status==='create');
     const batchSupported=['add-objects-batch','show-task','show-validations'].every(name=>sessions.catalog?.commands.some(command=>command.name===name));
     while(pending.length) {
-      const ready=pending.filter(o=>(!plan.importTagUid||o.type==='tag'||mapping.has(plan.importTagUid))&&[...refs(pick(normalizedObject(o.source),writableFields(o.type,plan.objectSchema,fields)),sourceMap)].every(uid=>mapping.has(uid)));
+      const ready=pending.filter(o=>(!plan.importTagUid||o.type==='tag'||mapping.has(plan.importTagUid))&&[...refs(pick(normalizedObject(o.gatewayDefinition||o.source),writableFields(o.type,plan.objectSchema,fields)),sourceMap)].every(uid=>mapping.has(uid)));
       const batch=ready.filter(o=>batchObjectTypes.has(o.type)&&!expectedCopyWarnings(o,plan).length).slice(0,50);
       if(batchSupported&&batch.length>=10) {
         const bodies=new Map(batch.map(row=>[row.uid,plannedObjectPayload(row,plan,mapping)])),byType=new Map();
@@ -785,16 +880,16 @@ export async function stagePlan({sessions,targetId,plan,onProgress=()=>{}}) {
         const rows=new Map(batch.map(row=>[row.uid,row]));
         await readDependencyFrontiers(new Set(rows.keys()),async uid=>{
           const row=rows.get(uid);return sessions.command(targetId,`show-${row.type}`,{name:bodies.get(uid).name,'details-level':'full'});
-        },(uid,response)=>{
+        },async(uid,response)=>{
           const row=rows.get(uid),actual=response.object||response,body=bodies.get(uid);
           if(!actual.uid||[...mapping.values()].includes(actual.uid)||plan.inventory.some(o=>o.uid===actual.uid))throw new Error(`Batch did not create a distinct identity for ${body.name}.`);
-          verifyCreatedDefinition(body,actual,{uid:actual.uid,type:row.type,expectedName:body.name,objectSchema:plan.objectSchema});
+          verifyCreatedDefinition(body,await resolveNatGateway(sessions,targetId,actual),{uid:actual.uid,type:row.type,expectedName:body.name,objectSchema:plan.objectSchema});
           mapping.set(uid,actual.uid);createdDefinitions.push({uid:actual.uid,type:row.type,expected:body,expectedName:body.name,objectSchema:plan.objectSchema});
         });
         for(const row of batch)pending.splice(pending.findIndex(o=>o.uid===row.uid),1);
         continue;
       }
-      const index=pending.findIndex(o=>(!plan.importTagUid||o.type==='tag'||mapping.has(plan.importTagUid))&&[...refs(pick(normalizedObject(o.source),writableFields(o.type,plan.objectSchema,fields)),sourceMap)].every(uid=>mapping.has(uid)));
+      const index=pending.findIndex(o=>(!plan.importTagUid||o.type==='tag'||mapping.has(plan.importTagUid))&&[...refs(pick(normalizedObject(o.gatewayDefinition||o.source),writableFields(o.type,plan.objectSchema,fields)),sourceMap)].every(uid=>mapping.has(uid)));
       if(index<0) throw new Error('Circular or unresolved object dependencies.');
       const [o]=pending.splice(index,1);
       const body=plannedObjectPayload(o,plan,mapping);
@@ -814,7 +909,7 @@ export async function stagePlan({sessions,targetId,plan,onProgress=()=>{}}) {
         if(configured['task-id'])await runNativeBatch({sessions,targetId,command:`set-${o.type}`,initialResponse:configured,allowedWarnings:plan.objects.flatMap(row=>expectedCopyWarnings(row,plan)),onProgress});
       }
       mapping.set(o.uid,created.uid);
-      createdDefinitions.push({uid:created.uid,type:o.type,expected:body,expectedName:o.importName||o.name,objectSchema:plan.objectSchema,sourceDefinition:o.source,apiVersion:plan.apiVersion,inheritedSource:['simple-gateway','simple-cluster'].includes(o.type)?o.source:undefined});
+      createdDefinitions.push({uid:created.uid,type:o.type,expected:body,expectedName:o.importName||o.name,objectSchema:plan.objectSchema,sourceDefinition:o.source,apiVersion:plan.apiVersion,gatewayRebuild:!!o.gatewayDefinition,inheritedSource:!o.gatewayDefinition&&['simple-gateway','simple-cluster'].includes(o.type)?o.source:undefined});
     }
     for(const l of plan.layers) {
       const body={...layerPayload(l,mapping,plan.policySchema),name:l.targetName};
@@ -973,7 +1068,7 @@ export async function stagePlan({sessions,targetId,plan,onProgress=()=>{}}) {
       const response=await sessions.command(targetId,definition.type.endsWith('-layer')||definition.type==='threat-profile'?`show-${definition.type}`:'show-object',{uid:definition.uid,'details-level':'full'});
       if(definition.parentLayer&&(!mapping.has(definition.parentLayer)||uidOf((response.object||response)['parent-layer'])!==mapping.get(definition.parentLayer)))throw new Error(`Staged inline layer parent differs: ${definition.expected.name}.`);
       if(definition.inheritedSource)verifyInheritedGatewaySettings(definition.inheritedSource,response.object||response,mapping);
-      verifyCreatedDefinition(definition.expected,response.object||response,definition);
+      verifyCreatedDefinition(definition.expected,await resolveNatGateway(sessions,targetId,response.object||response),definition);
     }
     return {state:'staged',packageUid:pkg.uid,logs,message:'Changes are staged and unpublished. Review in SmartConsole, then publish or discard.'};
   } catch(error) {

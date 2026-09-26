@@ -165,3 +165,19 @@ test('staging retains multiple NAT sections and unsectioned rules on each side o
   assert.deepEqual(rows.map(x=>x.name),['u1','u2','s1','u3','u4','s2','u5','Automatic Generated Rules : host','auto','l1','s3','l2']);
   assert.ok(writes.every(x=>!Object.hasOwn(x,'natPosition')));
 });
+
+test('exception verification accepts reordered mapped object sets but rejects changed membership',()=>{
+ const members=['one','two','three','four','five'];
+ const mapping=new Map(members.map(x=>[x,'target-'+x]));
+ const expected={uid:'exception',name:'RubrikBackupRule',type:'threat-exception',destination:members,source:members,'destination-negate':false};
+ const actual={...expected,uid:'copy',source:members.map(x=>({uid:mapping.get(x)})),destination:members.toReversed().map(x=>({uid:mapping.get(x)}))};
+ assert.doesNotThrow(()=>verifyRulebase([expected],[actual],mapping,new Map(),'Exceptions'));
+ for(const destination of [actual.destination.slice(1),[...actual.destination,{uid:'extra'}],[...actual.destination.slice(1),{uid:'wrong'}],[...actual.destination.slice(1),actual.destination[1]]]) {
+  assert.throws(()=>verifyRulebase([expected],[{...actual,destination}],mapping,new Map(),'Exceptions'),/RubrikBackupRule.*destination.*Expected.*received/);
+ }
+ assert.throws(()=>verifyRulebase([expected],[{...actual,'destination-negate':true}],mapping,new Map(),'Exceptions'),/destination-negate/);
+});
+test('rule order remains significant when match-object order is normalized',()=>{
+ const first={uid:'a',name:'First',type:'threat-exception',destination:['a','b']},second={...first,uid:'b',name:'Second'};
+ assert.throws(()=>verifyRulebase([first,second],[second,first],new Map(),new Map(),'Exceptions'),/name/);
+});

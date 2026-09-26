@@ -191,15 +191,22 @@ Renaming changes the incoming copy and its mapped references. It does not overwr
 | --- | --- |
 | **Policy components** | Select Access Control, Threat Prevention, HTTPS Inspection and manual NAT independently. Component selection also applies to export. |
 | **Preserve section headers** | Keep headings, or omit Access/HTTPS/NAT headings while retaining rule order. TP exception-group ownership remains intact. |
+| **Rebuild gateways at destination** | Explicitly resolve each referenced gateway in the preview. Select an existing destination gateway without modifying it, or create a minimal gateway or cluster using a new name and an operator-provided destination IPv4/IPv6 address. Source gateway configuration is omitted. New clusters require manual member and cluster-mode configuration. Disabled by default. |
 | **Suffix for imported objects** | Request separate copies of eligible user objects. Built-in, DNS-domain, certificate and repository-defined identities retain their required names. |
 | **Tag new objects** | Create or match a migration tag and apply it to newly created supported objects. Reused destination objects are not edited. |
 | **Migration API version** | Request a shared supported version, such as `v1.9`, instead of automatic negotiation. |
 
 An exact destination match under the requested suffixed name may be reused. Differently named equivalents do not defeat an explicit copy request. Duplicate-IP host copies are disclosed in preview; only their exact reviewed warning can be acknowledged. Unrelated warnings stop staging.
 
+In gateway rebuild mode, open **Resolve** for each gateway or cluster in the objects preview. Mappings retain rule and group references using the selected destination UID. A minimal gateway or cluster needs manual SIC, interfaces, topology, blade, routing, NAT and (where applicable) Smart-1 Cloud onboarding configuration before policy installation. Source IPs, MaaS tunnel addresses and gateway settings are not copied automatically. Readback checks the requested minimal definition and accepts destination-generated defaults; this mode deliberately does not claim source gateway configuration parity. Minimal clusters retain the simple-cluster type but do not copy source members; add members and configure the cluster mode manually. Existing mapped gateways are never configured by the app. Mapping decisions are included in preview drift checks. Gateway rebuild applies to live and archive imports; exports retain complete source definitions and dependencies.
+
 API v2.1 ignores Threat Prevention profile tags. The optional import tag therefore excludes those profiles with a notice; existing source profile tags block when they cannot be preserved.
 
 A NAT-only migration creates the empty Access context required by the destination package. Automatic NAT follows required objects regardless of whether generated rules appeared in the source rulebase.
+
+Named automatic-NAT installation gateways are resolved to one exact source gateway or cluster and remapped with other references. In rebuild mode, resolve those gateway choices before their networks and parent groups can be compared. Ambiguous or missing gateway names remain blocked. Destination readback resolves returned gateway names before verifying NAT settings.
+
+Shared built-in IPS layers are copied into separate destination layers for this policy; sharing with other source packages is not recreated. Copied rules and exceptions are verified. Empty non-writable Threat Prevention permissions and `shared: false` are response defaults; nonempty permissions and unsupported sharing on ordinary threat layers remain blocked. Referenced IPS protections must exist in the destination. Country and other Updatable Objects require an initialized destination repository; use **Update destination repository** in Preflight checks to run `update-updatable-objects-repository-content` in the destination management context, then rescan. The button waits for any returned task, verifies repository access, and expires the old preview. It does not publish the migration or install policy. Preview never initializes external repositories automatically.
 
 ## Archives
 
@@ -489,3 +496,11 @@ Single Policy Move was previously named **CMA to CMA**. The broader name reflect
 The native structure and visual system originate from **CP-API-Framework**. Check Point's **ExportImportPolicyPackage** is a pinned behavior reference for traversal, object handling and archive interoperability. The vendored V6.3 source is retained under its Apache-2.0 license; the application does not run it. See [source provenance](docs/upstream.md) and the license included with the vendored project.
 
 This project is not certified by Check Point. Feature coverage, release-specific behavior and live validation claims are documented in this repository rather than inferred from the reference tool's capabilities.
+
+### Refresh destination IPS content
+
+For policies with Threat Prevention layers, **Update destination IPS now** in Preflight checks calls `run-ips-update` on the destination using the preview's API version. It requests the latest package, waits for the returned task, and expires the preview so a fresh scan checks protection availability. An uncertain task is polled again instead of submitting another update. Missing task IDs remain unconfirmed and require inspection in SmartConsole. Active migrations must be resolved first. This action does not publish the migration, install policy, or guarantee that a missing or retired protection will become available.
+
+### Acknowledge manual IPS exceptions
+
+When a referenced IPS protection cannot be verified in the destination, Preflight lists the affected exception occurrences. Review the list, check the acknowledgment, and choose **Accept manual handling & rescan** to continue without those entire exceptions. Other policy rules and references remain subject to normal validation. The full omitted source exceptions and their owning layers/rules are retained in `manualFollowups` in the downloaded plan and a warning remains at final review. Recreate or replace them manually before installing policy. Use **Undo manual handling & rescan** to restore normal checks. Changes to the acknowledged exception definitions invalidate the acknowledgment; the app does not remove protection selectors from an exception or silently widen its scope.

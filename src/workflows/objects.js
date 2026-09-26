@@ -1,5 +1,29 @@
 import {writableFields} from './adapters.js';
 import { createHash, X509Certificate } from 'node:crypto';
+import {isIP} from 'node:net';
+
+export const gatewayTypes=new Set(['simple-gateway','simple-cluster']);
+function gatewayResolution(object,destination,choice) {
+  if(globalObject(object)||builtin(object))return {uid:object.uid,name:object.name,type:object.type,source:object,target:null,status:'blocked',reason:'Global and built-in gateways cannot be rebuilt or remapped.'};
+  const row={uid:object.uid,name:object.name,type:object.type,source:object,target:null,status:'conflict',gatewayResolutionAllowed:true,renameAllowed:false,
+    gatewayCandidates:destination.filter(o=>o.type===object.type&&!builtin(o)&&!globalObject(o)).map(o=>pick(o,['uid','name','type'])),
+    reason:'Choose an existing destination gateway, or create a minimal gateway with a destination address. Source gateway settings will not be copied.'};
+  if(object.type==='simple-cluster')row.reason='Choose an existing destination cluster, or create a minimal cluster with a name and destination IP. Members and source cluster settings are not copied.';
+  if(!choice)return row;
+  if(choice.action==='reuse-gateway') {
+    const target=destination.find(o=>o.uid===choice.targetUid&&o.type===object.type&&!builtin(o)&&!globalObject(o));
+    if(!target)throw new Error(`Destination gateway mapping is unavailable for ${object.name}. Rescan and select it again.`);
+    return {...row,status:'reuse',target,gatewayResolution:choice.action,reason:`Explicitly map ${object.name} to destination ${target.name}. Its existing settings and SIC remain unchanged; imported references use its UID.`};
+  }
+  if(choice.action!=='create-gateway')throw new Error('Choose an existing destination object or create a minimal definition.');
+  const name=typeof choice.name==='string'?choice.name.trim():'';
+  const address=typeof choice.address==='string'?choice.address.trim():'';
+  if(!name||name.length>100||/[\x00-\x1f\x7f]/.test(name))throw new Error('Enter a gateway name of 1–100 characters without control characters.');
+  if(!isIP(address))throw new Error('Enter the destination gateway IPv4 or IPv6 address. Source or cloud tunnel addresses are not copied automatically.');
+  if(destination.some(o=>o.name.toLowerCase()===name.toLowerCase()))throw new Error(`The destination already contains ${name}. Select it for reuse or choose a new name.`);
+  const gatewayDefinition={uid:object.uid,type:object.type,name,[isIP(address)===4?'ipv4-address':'ipv6-address']:address};
+  return {...row,status:'create',importName:name,gatewayDefinition,gatewayResolution:choice.action,reason:`Create minimal ${object.type==='simple-cluster'?'cluster':'gateway'} ${name} at ${address}. ${object.type==='simple-cluster'?'Add cluster members and configure the cluster mode manually. ':''}Configure SIC, interfaces, topology, blades, routing, NAT and cloud onboarding manually before installing policy. Source gateway settings are omitted.`};
+}
 
 export const certificateTypes=new Set(['server-certificate','outbound-inspection-certificate','custom-trusted-ca-certificate']);
 export function certificateFingerprint(object) {
@@ -67,7 +91,7 @@ export function normalizedObject(obj) {
       delete result[key];
     }
     if(result['autonomous-system-number']!==undefined) {
-      if(![0,'0'].includes(result['autonomous-system-number']))throw new Error('Gateway autonomous-system-number requires a routing configuration workflow.');
+      if(![0,'0'].includes(result['autonomous-system-number']))throw new Error(`Gateway ${obj.name || obj.uid} reports autonomous-system-number=${JSON.stringify(result['autonomous-system-number'])}. Routing configuration cannot currently be preserved by this adapter; migration of this object is blocked.`);
       delete result['autonomous-system-number'];
     }
     if(obj.type==='simple-cluster') {
@@ -181,6 +205,7 @@ export function semantic(obj, objects, stack = new Set(), schema) {
   return { type: obj.type, ...resolve(definition) };
 }
 export function unsupported(obj,schema) {
+  if(obj['unresolved-gateway-mapping']===true)return `Resolve the destination gateway mapping for ${obj.name} first. Objects using its automatic NAT or other references will then be compared again.`;
   if (globalObject(obj)) return 'Object belongs to the Global Domain. Remove global policy assignment and scan again.';
   if (builtin(obj)) return '';
   if (!fields[obj.type]&&!schema?.[obj.type]) return `Object type ${obj.type} requires a supported adapter; automatic substitution is disabled.`;
@@ -230,8 +255,17 @@ export function overlap(a,b) {
   }
   return false;
 }
-export function compareObjects(source, destination, schema) {
-  const sm=new Map(source.map(o=>[o.uid,o])), dm=new Map(destination.map(o=>[o.uid,o]));
+export function compareObjects(source, destination, schema, options={}, gatewayChoices={}) {
+  const gatewayRows=new Map(options.rebuildGateways?source.filter(o=>gatewayTypes.has(o.type)).map(o=>[o.uid,gatewayResolution(o,destination,gatewayChoices[o.uid])]):[]);
+  // Compare dependencies using the explicitly selected destination identity, not
+  // the source device configuration. Unresolved mappings keep parents blocked.
+  const sourceIdentity=o=>{
+    const row=gatewayRows.get(o.uid);if(!row)return o;
+    const unresolved=row.status!=='reuse'&&row.status!=='create';
+    return {uid:o.uid,type:o.type,name:unresolved?o.name:row.target?`destination-uid:${row.target.uid}`:`new-gateway:${o.uid}`,...unresolved?{'unresolved-gateway-mapping':true}:{}};
+  };
+  const targetIdentity=o=>options.rebuildGateways&&gatewayTypes.has(o.type)?{uid:o.uid,type:o.type,name:`destination-uid:${o.uid}`}:o;
+  const sm=new Map(source.map(o=>[o.uid,sourceIdentity(o)])), dm=new Map(destination.map(o=>[o.uid,targetIdentity(o)]));
   // Definitions are immutable within a scan. Compute each destination signature
   // once instead of rebuilding recursive groups for every source candidate.
   const byName=new Map(),byType=new Map(),signatures=new Map();
@@ -249,6 +283,7 @@ export function compareObjects(source, destination, schema) {
     return signatures.get(object);
   };
   return source.map(o=>{
+    if(gatewayRows.has(o.uid))return gatewayRows.get(o.uid);
     const reason=unsupported(o,schema);
     const row={uid:o.uid,name:o.name,type:o.type,source:o,target:null,status:'create',reason:'No matching object in the destination.'};
     if(reason) return {...row,status:'blocked',reason};
@@ -301,18 +336,22 @@ export function translate(value, mapping) {
 export function resolveObjectRenames(rows, destination, renames = {}, reservedNames = [], schema, options = {}) {
   if (!renames || Array.isArray(renames) || typeof renames !== 'object') throw new Error('Invalid rename choices.');
   const source = rows.map(row => row.source);
-  const profileChoices=Object.fromEntries(Object.entries(renames).filter(([,v])=>v&&typeof v==='object'));
+  const choices=Object.fromEntries(Object.entries(renames).filter(([,v])=>v&&typeof v==='object'));
+  const gatewayChoices=Object.fromEntries(Object.entries(choices).filter(([,v])=>['reuse-gateway','create-gateway'].includes(v.action)));
+  if(Object.keys(gatewayChoices).length&&!options.rebuildGateways)throw new Error('Gateway mappings require rebuild gateways mode.');
+  for(const uid of Object.keys(gatewayChoices))if(!source.some(o=>o.uid===uid&&gatewayTypes.has(o.type)))throw new Error('Gateway mapping requires a gateway or cluster in this preview.');
+  const profileChoices=Object.fromEntries(Object.entries(choices).filter(([uid])=>!Object.hasOwn(gatewayChoices,uid)));
   renames=Object.fromEntries(Object.entries(renames).filter(([,v])=>!v||typeof v!=='object'));
   const names = new Map();
-  if(options.objectSuffix)for(const object of source)if(!builtin(object)&&!['dns-domain','updatable-object'].includes(object.type)&&!certificateTypes.has(object.type)&&object.uid!==options.importTagUid)names.set(object.uid,object.name+options.objectSuffix);
-  const original = compareObjects(source.map(o=>names.has(o.uid)?{...o,name:names.get(o.uid)}:o), destination,schema);
+  if(options.objectSuffix)for(const object of source)if(!(options.rebuildGateways&&gatewayTypes.has(object.type))&&!builtin(object)&&!['dns-domain','updatable-object'].includes(object.type)&&!certificateTypes.has(object.type)&&object.uid!==options.importTagUid)names.set(object.uid,object.name+options.objectSuffix);
+  const original = compareObjects(source.map(o=>names.has(o.uid)?{...o,name:names.get(o.uid)}:o), destination,schema,options,gatewayChoices);
   for (const [uid, value] of Object.entries(renames)) {
     const row = original.find(row => row.uid === uid);
     if (!row?.renameAllowed) throw new Error('Only supported objects with a name conflict can be renamed. Rescan and review this object.');
     if (typeof value !== 'string' || !value.trim() || value.trim().length > 100 || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Enter an object name of 1–100 characters without control characters.');
     const name = value.trim();
     if (destination.some(o => o.name.toLowerCase() === name.toLowerCase())) {
-      const candidate=compareObjects(source.map(o=>({...o,name:o.uid===uid?name:names.get(o.uid)||o.name})),destination,schema).find(o=>o.uid===uid);
+      const candidate=compareObjects(source.map(o=>({...o,name:o.uid===uid?name:names.get(o.uid)||o.name})),destination,schema,options,gatewayChoices).find(o=>o.uid===uid);
       if(candidate.status!=='reuse'||candidate.target.name.toLowerCase()!==name.toLowerCase())throw new Error(`The destination already contains a different object named ${name}. Choose a unique name.`);
     }
     if (reservedNames.some(n => n.toLowerCase() === name.toLowerCase())) throw new Error(`The name ${name} is reserved for a policy or layer in this migration.`);
@@ -324,7 +363,7 @@ export function resolveObjectRenames(rows, destination, renames = {}, reservedNa
     if (source.some(o => o.uid !== uid && (names.get(o.uid) || o.name).toLowerCase() === name.toLowerCase())) throw new Error(`Another object in this migration uses the name ${name}.`);
   }
   const effective = source.map(o => names.has(o.uid) ? {...o, name:names.get(o.uid)} : o);
-  const resolved=compareObjects(effective, destination,schema).map((row, i) => {
+  const resolved=compareObjects(effective, destination,schema,options,gatewayChoices).map((row, i) => {
     if (!names.has(row.uid)) return row;
     // A rename must not silently become a reuse of a differently named object.
     const reused = row.status === 'reuse' && row.target.name.toLowerCase()!==names.get(row.uid).toLowerCase();
@@ -352,5 +391,6 @@ export function resolveObjectRenames(rows, destination, renames = {}, reservedNa
   }
   const importNames=resolved.filter(o=>o.status==='create').map(o=>(o.importName||o.name).toLowerCase());
   if(new Set(importNames).size!==importNames.length)throw new Error('Imported object names must be unique.');
+  for(const row of resolved.filter(o=>o.gatewayDefinition))if(reservedNames.some(n=>n.toLowerCase()===row.importName.toLowerCase()))throw new Error('Gateway name is reserved for a policy or layer.');
   return resolved;
 }

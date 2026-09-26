@@ -224,3 +224,25 @@ test('threat layer readback accepts absent-schema nonshared and empty permission
  assert.throws(()=>verifyCreatedDefinition(expected,{...actual,shared:true},context),/shared/);
  assert.throws(()=>verifyCreatedDefinition(expected,{...actual,'permissions-profiles':['admin']},context),/permissions-profiles/);
 });
+
+test('application-site readback permits only an absent-source recommended-services default on older APIs',async()=>{
+ const {catalogsReady}=await import('../src/catalogs.js');const {objectAdapters}=await import('../src/workflows/adapters.js');
+ const schema=objectAdapters((await catalogsReady).get('v2.1'));
+ const source={uid:'site',type:'application-site',name:'Block-MS-RemoteAssistance','primary-category':'Remote Administration','url-list':['remoteassistance.support.services.microsoft.com'],'urls-defined-as-regular-expression':false};
+ const expected=objectPayload(source,new Map(),schema),context={uid:'site',type:'application-site',sourceDefinition:source,objectSchema:schema,apiVersion:'v2.1'};
+ const recommended=[
+  ['97aeb3d4-9aea-11d5-bd16-0090272ccb30','http','tcp','80'],
+  ['97aeb443-9aea-11d5-bd16-0090272ccb30','https','tcp','443'],
+  ['8eddeaa0-259d-448f-95b6-490a39f55962','HTTP_proxy','tcp','8080'],
+  ['704fbf04-1714-49a1-a750-38c0e4139a11','HTTPS_proxy','tcp','8080'],
+  ['706c720f-c90d-4aa4-8ab4-967e3887f2f0','quic','udp','443']
+ ].map(([uid,name,type,port])=>({uid,name,type,port}));
+ for(const services of [recommended,recommended.slice(0,4).reverse()])assert.doesNotThrow(()=>verifyCreatedDefinition(expected,{...source,'match-settings':{mode:'recommended','recommended-services':services}},context));
+ for(const services of [[],recommended.slice(1),[...recommended,{uid:'extra',name:'ssh',type:'tcp',port:'22'}],recommended.map((s,i)=>i? s:{...s,port:'81'}),recommended.map((s,i)=>i?s:{...s,uid:'different'}),recommended.map((s,i)=>i?s:{...s,unknown:true})])assert.throws(()=>verifyCreatedDefinition(expected,{...source,'match-settings':{mode:'recommended','recommended-services':services}},context),/match-settings/);
+ for(const settings of [{mode:'recommended'},{mode:'recommended','override-services':[]}])assert.doesNotThrow(()=>verifyCreatedDefinition(expected,{...source,'match-settings':settings},context));
+ for(const settings of [{mode:'any'},{mode:'customize','override-services':['https']},{mode:'recommended','override-services':['https']},{mode:'recommended',unknown:false},{}])assert.throws(()=>verifyCreatedDefinition(expected,{...source,'match-settings':settings},context),/match-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,{...source,'match-settings':{mode:'recommended'}},{...context,sourceDefinition:{...source,'match-settings':{mode:'recommended'}}}),/match-settings/);
+ assert.throws(()=>verifyCreatedDefinition(expected,{...source,'url-list':['wrong.example'],'match-settings':{mode:'recommended'}},context),/url-list/);
+ const newer=objectAdapters((await catalogsReady).get('v2.2'));
+ assert.throws(()=>verifyCreatedDefinition(expected,{...source,'match-settings':{mode:'recommended'}},{...context,objectSchema:newer}),/match-settings/);
+});

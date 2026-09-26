@@ -127,13 +127,88 @@ export class Workbench {
     const snapshot=importArchive(bytes);if(snapshot.upstream)coerceUpstream(snapshot,await (await catalogsReady).ensure(snapshot.apiVersion));c.archive={snapshot,bytes,descriptor:archiveDescriptor(bytes,snapshot)};
     return {archive:c.archive.descriptor};
   });}
+  async manualIps(id,body) {return this.locked(id,async c=>{
+    if(c.demo)throw new Error('Manual IPS handling requires a real destination preview.');
+    const plan=c.plan;
+    if(!plan||plan.id!==body.planId||plan.state!=='preview'||c.job)throw new Error('Manual IPS handling requires the current unstaged preview.');
+    const choices=[...(c.input.options.manualIps||[])].filter(x=>x.uid!==body.objectUid);
+    if(body.reset!==true) {
+      const item=plan.checks.find(check=>!check.ok&&check.manualIps?.uid===body.objectUid)?.manualIps;
+      if(!item||body.acknowledged!==true)throw new Error('Review and acknowledge the affected IPS exceptions first.');
+      choices.push({uid:item.uid,fingerprint:item.fingerprint});
+    }
+    const input={...c.input,options:{...c.input.options,manualIps:choices}};
+    const engine=await nativeEngine();
+    const rebuilt=await engine.scan({sessions:input.archiveToken?archiveSessions(this.sessions,c.sourceId,c.archive.snapshot,c.targetId):this.sessions,...managementContext(c),sourceId:c.sourceId,targetId:c.targetId,...input,engineRevision:engine.revision,onProgress:update=>this.progress(c,update)});
+    c.input=input;c.plan=rebuilt;
+    return {plan:publicPlan(c.plan)};
+  });}
+  async updateIps(id,body) {return this.locked(id,async c=>{
+    if(c.demo)throw new Error('IPS updates require a real destination connection.');
+    if(!c.targetId||!c.plan||c.plan.id!==body.planId||c.plan.state!=='preview')throw new Error('IPS update requires the current destination preview.');
+    if(c.job&&!['failed','discarded','published'].includes(c.job.state))throw new Error('Resolve the active migration before updating IPS.');
+    const version=c.plan.apiVersion;
+    if(c.ipsUpdate&&(c.ipsUpdate.targetId!==c.targetId||c.ipsUpdate.version!==version))throw new Error('An IPS update is unresolved in another destination session or API version. Check that destination before starting another update.');
+    const api=await migrationApi(this.sessions,[{id:c.targetId,label:'Destination domain'}],{version});
+    api.validate('run-ips-update',{});
+    c.plan.expiresAt=new Date(0).toISOString();
+    this.progress(c,'Requesting the latest IPS content on the destination…');
+    if(!c.ipsUpdate) {
+      c.ipsUpdate={targetId:c.targetId,version};
+      try {
+        const response=await api.command(c.targetId,'run-ips-update',{});
+        c.ipsUpdate.taskId=response['task-id'];
+      }catch(error){if(error.phase==='api-response')delete c.ipsUpdate;throw error;}
+    }
+    if(!c.ipsUpdate.taskId)throw new Error('IPS update outcome is unconfirmed because no task ID was received. Check the destination IPS update status in SmartConsole before retrying; another update has not been submitted.');
+    this.progress(c,'Waiting for the destination IPS update task…');
+    try {await this.sessions.waitForTask(c.targetId,c.ipsUpdate.taskId,'primary',version);}
+    catch(error){if(error.taskOutcome==='failed')delete c.ipsUpdate;throw error;}
+    delete c.ipsUpdate;
+    const message='Destination IPS update completed. Rescan to check the required protections; an update may not restore every missing protection.';
+    this.progress(c,message);
+    return {plan:publicPlan(c.plan),message};
+  });}
+  async updateRepository(id,body) {return this.locked(id,async c=>{
+    if(c.demo)throw new Error('Repository updates require a real destination connection.');
+    if(!c.targetId||!c.plan||c.plan.id!==body.planId||c.plan.state!=='preview')throw new Error('Repository update requires the current destination preview.');
+    if(c.job&&!['failed','discarded','published'].includes(c.job.state))throw new Error('Resolve the active migration before updating the repository.');
+    const version=c.plan.apiVersion;
+    if(c.repositoryUpdate&&(c.repositoryUpdate.targetId!==c.targetId||c.repositoryUpdate.version!==version))throw new Error('A repository update is unresolved in another destination session or API version. Check that destination before starting another update.');
+    const api=await migrationApi(this.sessions,[{id:c.targetId,label:'Destination domain'}],{version});
+    api.validate('update-updatable-objects-repository-content',{});
+    // Repository updates change the inventory independently of policy sessions.
+    // Keep the preview available for review, but require a new scan before staging.
+    c.plan.expiresAt=new Date(0).toISOString();
+    this.progress(c,'Updating the destination Updatable Objects repository…');
+    if(!c.repositoryUpdate) {
+      c.repositoryUpdate={submitted:true,targetId:c.targetId,version};
+      try {
+        const response=await api.command(c.targetId,'update-updatable-objects-repository-content',{});
+        c.repositoryUpdate.taskId=response['task-id'];
+      }catch(error){if(error.phase==='api-response')delete c.repositoryUpdate;throw error;}
+    }
+    if(c.repositoryUpdate.taskId) {
+      this.progress(c,'Waiting for the destination repository update task…');
+      try {await this.sessions.waitForTask(c.targetId,c.repositoryUpdate.taskId,'primary',version);}
+      catch(error){if(error.taskOutcome==='failed')delete c.repositoryUpdate;throw error;}
+    }
+    this.progress(c,'Checking that the destination repository is readable…');
+    const contents=await api.command(c.targetId,'show-updatable-objects-repository-content',{limit:1,'details-level':'full'});
+    if(!Array.isArray(contents.objects))throw new Error('Repository update could not be verified. Check the destination repository status before retrying.');
+    delete c.repositoryUpdate;
+    this.progress(c,'Destination repository is available. Rescan to verify the required country objects.');
+    return {plan:publicPlan(c.plan),message:'Destination repository is available. Rescan to verify the required country objects.'};
+  });}
   async exportPolicy(id,body) {return this.locked(id,async c=>{
     if(body.format!==undefined&&!['native','upstream'].includes(body.format))throw new Error('Choose a supported archive format.');
     if(['staging','staged','publishing','publish-unknown','recovery-required'].includes(c.job?.state))throw new Error('Resolve the current migration before exporting another archive.');
     if(!c.sourceId||!c.targetId)throw new Error('Load source and destination domains first.');
     const engine=await nativeEngine();
     await this.refreshExpiredReads(c);
-    const options=normalizeMigrationOptions({...body.options,objectSuffix:'',importTag:''});
+    // Archives retain complete source definitions and gateway dependencies.
+    // Rebuild is a destination import decision, not destructive export filtering.
+    const options=normalizeMigrationOptions({...body.options,objectSuffix:'',importTag:'',rebuildGateways:false});
     const plan=await engine.scan({sessions:this.sessions,...managementContext(c),sourceId:c.sourceId,targetId:c.targetId,sourceDomain:c.sourceDomain,targetDomain:c.targetDomain,packageUid:body.packageUid,apiVersion:body.apiVersion||undefined,options,targetName:'Archive_'+randomUUID().slice(0,8),onProgress:update=>this.progress(c,update)});
     if(plan.checks.some(check=>!check.ok&&check.name.startsWith('Global policy')))throw new Error('Global policy must be unassigned before exporting.');
     const bytes=body.format==='upstream'?exportUpstreamArchive(plan):exportArchive(plan),snapshot=importArchive(bytes);
@@ -147,10 +222,13 @@ export class Workbench {
     if(!plan || plan.id!==body.planId || plan.state!=='preview' || c.job) throw new Error('Rename requires the current, unstaged preview. Rescan first.');
     if(Date.parse(plan.expiresAt)<Date.now()) throw new Error('Preview expired. Rescan before resolving conflicts.');
     const row=plan.objects.find(o=>o.uid===body.objectUid);
-    if(!row?.renameAllowed&&!row?.profileResolutionAllowed) throw new Error('This conflict cannot be resolved by renaming.');
+    if(!row?.renameAllowed&&!row?.profileResolutionAllowed&&!row?.gatewayResolutionAllowed) throw new Error('This conflict cannot be resolved by renaming.');
     const renames={...plan.renames};
     if(body.reset===true) delete renames[row.uid];
-    else if(row.profileResolutionAllowed) {
+    else if(row.gatewayResolutionAllowed) {
+      if(!['reuse-gateway','create-gateway'].includes(body.gatewayAction))throw new Error('Choose a gateway resolution.');
+      renames[row.uid]=body.gatewayAction==='reuse-gateway'?{action:body.gatewayAction,targetUid:body.targetUid}:{action:body.gatewayAction,name:body.newName,address:body.address};
+    }else if(row.profileResolutionAllowed) {
       if(!['reuse-profile','copy-profile'].includes(body.profileAction))throw new Error('Choose a profile resolution.');
       renames[row.uid]=body.profileAction==='reuse-profile'?{action:body.profileAction,targetUid:row.target?.uid||row.profileTargetUid}:{action:body.profileAction,name:body.newName};
     }else renames[row.uid]=body.newName;

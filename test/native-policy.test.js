@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {stagePlan,buildPlan,validatePlanCommands} from '../src/workflows/migration.js';
+import {stagePlan,buildPlan,validatePlanCommands,ipsManualImpact,applyManualIps} from '../src/workflows/migration.js';
 import {objectAdapters} from '../src/workflows/adapters.js';
 import {catalogsReady} from '../src/catalogs.js';
 import {validateCommand} from '../src/workflows/compatibility.js';
@@ -128,6 +128,36 @@ test('native live-source scan discovers TP/HTTPS dependencies and exceptions bef
  assert.equal(plan.ruleCount,5);assert.equal(plan.layers.find(l=>l.kind==='threat').exceptionSets[0].items.length,1);
  assert.equal(plan.layers[0]['detect-using-x-forward-for'],false);assert.equal(plan.layers[0]['implicit-cleanup-action'],'drop');
  assert.equal((await stagePlan({sessions,targetId:'target',plan})).state,'staged');
+ const gateway={uid:'a1234567-1234-1234-1234-123456789abc',name:'Cloud Gateway',type:'simple-gateway','ipv4-address':'192.0.2.1','autonomous-system-number':'65001'};
+ const blockedSessions={command:async(id,cmd,body={})=>{
+  if(cmd==='show-object'&&body.uid===gateway.uid)return {object:gateway};
+  const reply=await sessions.command(id,cmd,body);
+  if(id==='source'&&cmd==='show-access-rulebase')return {...reply,rulebase:reply.rulebase.map(rule=>rule.type==='access-rule'?{...rule,source:[gateway.uid]}:rule)};
+  return reply;
+ }};
+ const blocked=await scan({sessions:blockedSessions,sourceId:'source',targetId:'target',rootId:'root',sourceDomain:{uid:'s',name:'Source'},targetDomain:{uid:'t',name:'Target'},packageUid:pkg.uid,targetName:'Copy'});
+ assert.equal(blocked.ready,false);
+ const row=blocked.objects.find(o=>o.uid===gateway.uid);
+ assert.equal(row.status,'blocked');assert.match(row.reason,/Cloud Gateway.*65001/);
+ for(const gatewayType of ['simple-gateway','simple-cluster']) {
+ gateway.type=gatewayType;
+ const writes=[],rebuiltDestination=destination();let createdGateway;
+ gateway['https-inspection']={'outbound-certificate':{uid:'b1234567-1234-1234-1234-123456789abc'}};
+ gateway['vpn-settings']={certificates:[{name:'defaultCert',domain:{uid:'c1234567-1234-1234-1234-123456789abc',name:'Source management'}}]};
+ const rebuildSessions={command:async(id,cmd,body={})=>{
+  if(id==='target'&&cmd===`add-${gatewayType}`){writes.push({cmd,body});createdGateway={...body,uid:'destination-gateway',type:gatewayType,'autonomous-system-number':'65002','cloud-generated-setting':true};return createdGateway;}
+  if(id==='target'&&cmd==='show-object'&&body.uid===createdGateway?.uid)return {object:createdGateway};
+  if(id==='target'&&cmd===`set-${gatewayType}`)throw new Error('Rebuild must not configure gateway settings.');
+  if(id==='target'&&!['show-api-versions','show-packages','show-objects','show-object','show-threat-profile'].includes(cmd))return rebuiltDestination.command(id,cmd,body);
+  return blockedSessions.command(id,cmd,body);
+ }};
+ const rebuilt=await scan({sessions:rebuildSessions,sourceId:'source',targetId:'target',rootId:'root',sourceDomain:{uid:'s',name:'Source'},targetDomain:{uid:'t',name:'Target'},packageUid:pkg.uid,targetName:'Copy',options:{rebuildGateways:true},renames:{[gateway.uid]:{action:'create-gateway',name:'Minimal Gateway',address:'192.0.2.2'}}});
+ assert.equal(rebuilt.ready,true,JSON.stringify(rebuilt.checks.filter(c=>!c.ok)));
+ assert.equal((await stagePlan({sessions:rebuildSessions,targetId:'target',plan:rebuilt})).state,'staged');
+ assert.equal(writes.length,1);assert.equal(writes[0].body['ipv4-address'],'192.0.2.2');
+ assert.ok(!('https-inspection' in writes[0].body));assert.ok(!('autonomous-system-number' in writes[0].body));
+ assert.ok(!('vpn-settings' in writes[0].body));assert.equal(writes[0].cmd,`add-${gatewayType}`);
+ }
 });
 
 test('shared TP exception groups are created once and retain separate direct exceptions',async()=>{
@@ -217,4 +247,16 @@ test('offline source API negotiation uses the archive version instead of the con
  const snapshot={apiVersion:'v1.9',objects:[],layers:[]};
  const sessions=archiveSessions({command:async()=>{throw new Error('No live source query expected');}},'source',snapshot,'target');
  assert.deepEqual(await sessions.command('source','show-api-versions'),{'current-version':'1.9','supported-versions':['1.9']});
+});
+
+test('acknowledged IPS exceptions are absent from staged payload and verified rule counts',async()=>{
+ const plan=planFixture(),layer=plan.layers.find(l=>l.kind==='threat');
+ layer.exceptionSets[0].items[0]['protection-or-site']=['missing'];
+ const impact=ipsManualImpact(plan.layers,'missing');
+ plan.manualFollowups=applyManualIps(plan.layers,[{uid:'missing',fingerprint:impact.fingerprint}],new Map([['missing',{uid:'missing',name:'Missing',type:'CpmiSdTopicPerProfileDynamic'}]]));
+ const rebuilt=buildPlan(plan),sessions=destination();
+ assert.equal(rebuilt.ruleCount,4);
+ const result=await stagePlan({sessions,targetId:'target',plan:rebuilt});
+ assert.equal(result.state,'staged');assert.equal(sessions.calls.filter(c=>c.cmd==='add-threat-exception').length,0);
+ assert.equal(rebuilt.manualFollowups[0].affected[0].exception.uid,'e');
 });

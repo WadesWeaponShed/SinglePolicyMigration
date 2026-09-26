@@ -1,0 +1,76 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {compareObjects,resolveObjectRenames} from '../src/workflows/objects.js';
+import {buildPlan,plannedObjectPayload,verifyCreatedDefinition,validatePlanCommands} from '../src/workflows/migration.js';
+import {normalizeMigrationOptions} from '../src/workflows/options.js';
+import {catalogsReady} from '../src/catalogs.js';
+import {objectAdapters} from '../src/workflows/adapters.js';
+const source={uid:'source-gw',type:'simple-gateway',name:'Cloud Gateway','ipv4-address':'100.64.0.5','autonomous-system-number':'65001','sic-state':'initialized',interfaces:[{name:'maas_tunnel'}],'logs-settings':{dangerous:'source'},'https-inspection':{'outbound-certificate':{uid:'source-cert'}}};
+const target={...source,uid:'target-gw',name:'Destination Gateway','ipv4-address':'192.0.2.1','autonomous-system-number':'65002'};
+const schema=objectAdapters((await catalogsReady).get('v2.1'));
+const options={rebuildGateways:true};
+const snapshot=(objects=[source],inventory=[target])=>({apiVersion:'v2.1',sourceDomain:{uid:'s',name:'Source'},targetDomain:{uid:'t',name:'Target'},targetName:'Copy',objects:compareObjects(objects,inventory,schema),inventory,objectSchema:schema,checks:[],layers:[],nat:[],package:{},options});
+const reuse={action:'reuse-gateway',targetUid:target.uid};
+const create={action:'create-gateway',name:'New Gateway',address:'192.0.2.40'};
+test('gateway rebuild is opt-in and requires an explicit resolution for every gateway',()=>{
+ assert.equal(normalizeMigrationOptions().rebuildGateways,false);
+ assert.throws(()=>normalizeMigrationOptions({rebuildGateways:'true'}));
+ assert.equal(compareObjects([source],[target],schema)[0].status,'blocked');
+ const pending=buildPlan(snapshot());assert.equal(pending.ready,false);assert.equal(pending.objects[0].gatewayResolutionAllowed,true);
+ const plan=buildPlan({...snapshot(),renames:{[source.uid]:reuse}});
+ assert.equal(plan.ready,true);assert.equal(plan.objects[0].status,'reuse');assert.equal(plan.objects[0].target.uid,target.uid);
+ assert.equal(buildPlan(plan).digest,plan.digest);assert.equal(buildPlan({...plan,renames:{}}).ready,false);
+ assert.throws(()=>buildPlan({...snapshot(),renames:{[source.uid]:{...reuse,targetUid:'missing'}}}),/unavailable/);
+ assert.throws(()=>buildPlan({...snapshot(),options:{},renames:{[source.uid]:reuse}}),/require rebuild/);
+});
+test('minimal gateway payload excludes source configuration and verifies only requested fields',()=>{
+ const plan=buildPlan({...snapshot(),renames:{[source.uid]:create}}),row=plan.objects[0];
+ assert.equal(plan.ready,true);const body=plannedObjectPayload(row,plan,new Map());
+ assert.deepEqual(Object.keys(body).sort(),['name','ipv4-address','comments','color','tags'].sort());
+ assert.equal(body['ipv4-address'],create.address);assert.equal(row.source,source);
+ assert.ok(plan.checks.some(c=>c.name.startsWith('Gateway rebuild')&&c.detail.includes('manually')));
+ const actual={...source,...body,uid:'new', 'new-cloud-default':true};
+ assert.doesNotThrow(()=>verifyCreatedDefinition(body,actual,{uid:'new',type:source.type,expectedName:create.name,gatewayRebuild:true,objectSchema:schema}));
+ for(const patch of [{uid:'other'},{type:'host'},{name:'Other'},{'ipv4-address':'192.0.2.41'}])assert.throws(()=>verifyCreatedDefinition(body,{...actual,...patch},{uid:'new',type:source.type,expectedName:create.name,gatewayRebuild:true,objectSchema:schema}));
+ assert.throws(()=>verifyCreatedDefinition(body,actual,{uid:'new',type:source.type,objectSchema:schema}));
+ for(const choice of [{...create,address:''},{...create,address:'example.com'},{...create,name:target.name},{...create,name:'Copy'}])assert.throws(()=>buildPlan({...snapshot(),renames:{[source.uid]:choice}}));
+});
+test('group reuse follows selected gateway identity and does not compare omitted source settings',()=>{
+ const group={uid:'g',type:'group',name:'Group',members:[source.uid]};
+ const destGroup={...group,uid:'dg',members:[target.uid]};
+ const plan=buildPlan({...snapshot([source,group],[target,destGroup]),renames:{[source.uid]:reuse}});
+ assert.equal(plan.ready,true);assert.equal(plan.objects.find(o=>o.uid==='g').status,'reuse');
+ const different=buildPlan({...snapshot([source,group],[target,destGroup]),renames:{[source.uid]:create}});
+ assert.equal(different.objects.find(o=>o.uid==='g').status,'conflict');
+});
+test('clusters can be created as minimal clusters or mapped only to existing clusters',()=>{
+ const cluster={...source,type:'simple-cluster'},dest={...target,type:'simple-cluster'};
+ const pending=buildPlan(snapshot([cluster],[dest]));assert.equal(pending.ready,false);
+ const created=buildPlan({...snapshot([{...cluster,'cluster-members':[{name:dest.name,'ipv4-address':'100.64.0.8'}]}],[dest]),renames:{[source.uid]:create}});
+ assert.equal(created.ready,true);assert.equal(created.objects[0].type,'simple-cluster');
+ const body=plannedObjectPayload(created.objects[0],created,new Map());
+ assert.equal(body.name,create.name);assert.equal(body['ipv4-address'],create.address);
+ assert.ok(!('members' in body));assert.ok(!('cluster-members' in body));assert.ok(!('vpn-settings' in body));
+ assert.ok(!created.checks.some(c=>c.name.startsWith('Cluster member')));
+ const actual={...body,uid:'new-cluster',type:'simple-cluster','cluster-members':[],'cluster-mode':'cluster-xl-ha','cloud-default':true};
+ assert.doesNotThrow(()=>verifyCreatedDefinition(body,actual,{uid:actual.uid,type:'simple-cluster',expectedName:create.name,gatewayRebuild:true,objectSchema:schema}));
+ assert.throws(()=>verifyCreatedDefinition(body,{...actual,type:'simple-gateway'},{uid:actual.uid,type:'simple-cluster',gatewayRebuild:true,objectSchema:schema}));
+ assert.equal(buildPlan({...snapshot([cluster],[dest]),renames:{[source.uid]:reuse}}).ready,true);
+ assert.throws(()=>buildPlan({...snapshot([cluster],[target]),renames:{[source.uid]:reuse}}),/unavailable/);
+ const global={...source,domain:{'domain-type':'global domain'}};
+ assert.equal(buildPlan({...snapshot([global]),renames:{[source.uid]:reuse}}).ready,false);
+});
+
+test('workbench gateway resolutions are bound to the current preview and can be undone',async()=>{
+ const {Workbench}=await import('../src/workflows/workbench.js');
+ const workbench=new Workbench({}),connection=await workbench.connect({demo:true}),context=workbench.get(connection.id);
+ context.plan=buildPlan(snapshot());context.input={};
+ await assert.rejects(workbench.rename(connection.id,{planId:'stale',objectUid:source.uid,gatewayAction:'reuse-gateway',targetUid:target.uid}),/current/);
+ const result=await workbench.rename(connection.id,{planId:context.plan.id,objectUid:source.uid,gatewayAction:'reuse-gateway',targetUid:target.uid});
+ assert.equal(result.plan.objects[0].status,'reuse');assert.equal(context.input.renames[source.uid].targetUid,target.uid);
+ const reset=await workbench.rename(connection.id,{planId:context.plan.id,objectUid:source.uid,reset:true});assert.equal(reset.plan.ready,false);
+ const created=await workbench.rename(connection.id,{planId:context.plan.id,objectUid:source.uid,gatewayAction:'create-gateway',newName:create.name,address:create.address});
+ assert.equal(created.plan.objects[0].gatewayDefinition['ipv4-address'],create.address);
+ await assert.rejects(workbench.rename(connection.id,{planId:context.plan.id,objectUid:source.uid,gatewayAction:'reuse-gateway',targetUid:'forged'}),/unavailable/);
+ assert.equal(context.plan.objects[0].status,'create');
+});
